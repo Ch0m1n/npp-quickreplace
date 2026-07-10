@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -58,12 +59,17 @@ public:
         Activation activation,
         std::string_view currentExtension) const;
 
+    [[nodiscard]] const ReplacementRule* findImmediate(
+        std::string_view trigger,
+        std::string_view currentExtension) const;
+
     [[nodiscard]] const ReplacementRule* findManual(
         std::string_view trigger,
         std::string_view currentExtension) const;
 
     [[nodiscard]] std::size_t size() const noexcept { return rules_.size(); }
     [[nodiscard]] const std::vector<ReplacementRule>& rules() const noexcept { return rules_; }
+    [[nodiscard]] bool hasImmediateRules() const noexcept { return hasImmediateRules_; }
 
     [[nodiscard]] static Activation activationForCharacter(
         int character,
@@ -72,6 +78,17 @@ public:
     [[nodiscard]] static std::string foldAscii(std::string_view value);
 
 private:
+    struct TransparentStringHash {
+        using is_transparent = void;
+
+        [[nodiscard]] std::size_t operator()(std::string_view value) const noexcept {
+            return std::hash<std::string_view>{}(value);
+        }
+        [[nodiscard]] std::size_t operator()(const std::string& value) const noexcept {
+            return operator()(std::string_view(value));
+        }
+    };
+
     [[nodiscard]] const ReplacementRule* findIndexed(
         std::string_view trigger,
         Activation activation,
@@ -82,9 +99,16 @@ private:
         const ReplacementRule& rule,
         std::string_view currentExtension);
 
+    using RuleIndex = std::unordered_map<
+        std::string,
+        std::size_t,
+        TransparentStringHash,
+        std::equal_to<>>;
+
     std::vector<ReplacementRule> rules_;
-    std::unordered_map<std::string, std::size_t> exactIndex_;
-    std::unordered_map<std::string, std::size_t> foldedIndex_;
+    RuleIndex exactIndex_;
+    RuleIndex foldedIndex_;
+    bool hasImmediateRules_ = false;
 };
 
 } // namespace nppqr

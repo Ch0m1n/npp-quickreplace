@@ -1,11 +1,16 @@
 #include "RuleStore.h"
 
+#include <windows.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "ConfigStore.h"
 
 namespace {
 
@@ -136,6 +141,80 @@ void testValidationAndTransactionalLoad() {
     expect(store.size() == 4, "another failed load is transactional");
 }
 
+
+void testImmediateRulesAndPrefixSafety() {
+    nppqr::RuleStore store;
+    const auto loaded = store.loadFromText(R"json(
+    {"version":1,"items":[
+      {"id":"instant","trigger":"zz","replacement":"instant","activation":["immediate"]},
+      {"id":"delimited","trigger":"word","replacement":"value","activation":["space"]}
+    ]}
+    )json");
+    expect(loaded.ok, "immediate rules load");
+    expect(store.hasImmediateRules(), "immediate rule presence is cached");
+    expect(store.findImmediate("zz", "") != nullptr, "immediate rule can be found");
+    expect(store.findImmediate("word", "") == nullptr, "delimiter rule is not treated as immediate");
+
+    const auto conflict = store.loadFromText(R"json(
+    {"version":1,"items":[
+      {"trigger":"aa","replacement":"short","activation":["immediate"]},
+      {"trigger":"aaa","replacement":"long","activation":["space"]}
+    ]}
+    )json");
+    expect(!conflict.ok, "an immediate prefix conflict is rejected");
+    expect(store.size() == 2, "failed immediate load remains transactional");
+}
+
+void testUnicodeNormalization() {
+    nppqr::RuleStore store;
+    const auto loaded = store.loadFromText(R"json(
+    {"version":1,"items":[
+      {"trigger":"é","replacement":"accent","activation":["space"]}
+    ]}
+    )json");
+    expect(loaded.ok, "NFC trigger loads");
+    expect(store.find("é", nppqr::Activation::space, "") != nullptr,
+        "canonically equivalent NFD input matches an NFC rule");
+}
+
+void testConfigPreservationAndBackups() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+        (L"NppQuickReplaceTests-" + std::to_wstring(::GetCurrentProcessId()) + L"-" +
+         std::to_wstring(::GetTickCount64()));
+    std::error_code directoryError;
+    std::filesystem::create_directories(directory, directoryError);
+    expect(!directoryError, "temporary config test directory is created");
+
+    const std::filesystem::path configPath = directory / "config.json";
+    std::string error;
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(configPath,
+        R"json({"pluginEnabled":true,"futureField":{"keep":42}})json", error),
+        "test config is written atomically");
+    nppqr::PluginConfig config;
+    const auto loaded = nppqr::ConfigStore::loadConfig(configPath, config);
+    expect(loaded.ok, "test config loads");
+    config.pluginEnabled = false;
+    const bool configSaved = nppqr::ConfigStore::saveConfigAtomic(configPath, config, error);
+    if (!configSaved) {
+        std::cerr << "Config save detail: " << error << '\n';
+    }
+    expect(configSaved, "config saves while preserving unknown fields");
+    std::string saved;
+    expect(nppqr::ConfigStore::readUtf8File(configPath, saved, error), "saved config is readable");
+    const nlohmann::json savedJson = nlohmann::json::parse(saved);
+    expect(savedJson["futureField"]["keep"] == 42, "unknown config fields survive a save");
+    expect(savedJson["pluginEnabled"] == false, "known config fields are updated");
+
+    const std::filesystem::path replacementsPath = directory / "replacements.json";
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(replacementsPath,
+        R"json({"version":1,"items":[]})json", error), "test replacements file is written");
+    std::filesystem::path backupPath;
+    expect(nppqr::ConfigStore::backupReplacements(
+        directory, replacementsPath, 3, backupPath, error), "replacement backup is created");
+    expect(!backupPath.empty() && std::filesystem::exists(backupPath), "backup path exists");
+
+    std::filesystem::remove_all(directory, directoryError);
+}
 void testTenThousandRules() {
     nlohmann::json root;
     root["version"] = 1;
@@ -172,6 +251,9 @@ int main() {
     testBasicMatching();
     testDelimiterClassification();
     testValidationAndTransactionalLoad();
+    testImmediateRulesAndPrefixSafety();
+    testUnicodeNormalization();
+    testConfigPreservationAndBackups();
     testTenThousandRules();
 
     if (failures != 0) {

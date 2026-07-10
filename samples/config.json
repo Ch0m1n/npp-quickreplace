@@ -5,6 +5,10 @@
   "processPaste": false,
   "skipReadOnlyDocuments": true,
   "skipMultiSelection": true,
+  "backup": {
+    "enabled": true,
+    "maxFiles": 10
+  },
   "maxTriggerBytes": 512,
   "logging": {
     "enabled": false,

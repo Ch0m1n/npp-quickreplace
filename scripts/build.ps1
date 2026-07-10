@@ -6,6 +6,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# PowerShell 7 can inherit both `Path` and `PATH` from layered launchers. MSBuild
+# treats them as duplicate environment keys and refuses to start CL.exe.
+$environmentKeys = [Environment]::GetEnvironmentVariables().Keys
+if (($environmentKeys -ccontains 'Path') -and ($environmentKeys -ccontains 'PATH')) {
+    Remove-Item Env:PATH
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 $buildDirectory = Join-Path $root 'build'
 
@@ -33,7 +41,7 @@ if (-not (Test-Path -LiteralPath $cmake)) {
 & $cmake -S $root -B $buildDirectory -A x64
 if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
 
-& $cmake --build $buildDirectory --config $Configuration --parallel
+& $cmake --build $buildDirectory --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'

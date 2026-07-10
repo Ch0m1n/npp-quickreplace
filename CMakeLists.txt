@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   NppQuickReplace
-  VERSION 0.2.0
+  VERSION 0.3.0
   DESCRIPTION "Fast, local text expansion for Notepad++"
   LANGUAGES CXX RC
 )
@@ -39,6 +39,7 @@ target_compile_definitions(NppQuickReplaceCore
 
 add_library(NppQuickReplace SHARED
   src/Plugin.cpp
+  src/RuleManager.cpp
   src/NppQuickReplace.rc
 )
 
@@ -57,7 +58,7 @@ target_compile_definitions(NppQuickReplace
     WIN32_LEAN_AND_MEAN
 )
 
-target_link_libraries(NppQuickReplace PRIVATE NppQuickReplaceCore Shell32)
+target_link_libraries(NppQuickReplace PRIVATE NppQuickReplaceCore Shell32 Comctl32 UxTheme Comdlg32 Ole32)
 
 set_target_properties(NppQuickReplace PROPERTIES
   PREFIX ""
@@ -94,7 +95,13 @@ install(FILES
   samples/replacements.json
   README.md
   LICENSE
+  THIRD_PARTY_NOTICES.md
   DESTINATION NppQuickReplace
+)
+install(FILES
+  third_party/nlohmann/LICENSE.MIT
+  third_party/notepadpp/LICENSE.txt
+  DESTINATION NppQuickReplace/licenses
 )
 
 set(CPACK_GENERATOR ZIP)
