@@ -30,7 +30,7 @@ using nppqr::RuleManagerOptions;
 using nppqr::RuleStore;
 
 constexpr wchar_t kPluginName[] = L"NppQuickReplace";
-constexpr wchar_t kPluginVersion[] = L"0.3.0-alpha";
+constexpr wchar_t kPluginVersion[] = L"0.4.0-alpha";
 constexpr int kCommandCount = 7;
 
 enum CommandIndex : int {

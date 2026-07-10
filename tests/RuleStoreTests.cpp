@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 #include "ConfigStore.h"
+#include "RuleExchange.h"
 
 namespace {
 
@@ -215,6 +216,93 @@ void testConfigPreservationAndBackups() {
 
     std::filesystem::remove_all(directory, directoryError);
 }
+
+void testDelimitedExchangeRoundTrip() {
+    const char* source = R"json({
+      "version": 1,
+      "groups": [{"id":"team","name":"팀 규칙","enabled":true}],
+      "items": [{
+        "id":"csv-roundtrip",
+        "enabled":true,
+        "trigger":"인사,말",
+        "replacement":"첫째 줄\n\"인용문\", 둘째 줄",
+        "group":"team",
+        "matchMode":"wholeWord",
+        "caseSensitive":true,
+        "activation":["space","enter"],
+        "fileExtensions":[".md",".txt"],
+        "description":"쉼표와 줄바꿈 테스트"
+      }]
+    })json";
+
+    const auto exported = nppqr::RuleExchange::exportDelimited(source, ',');
+    expect(exported.ok, "CSV export succeeds");
+    expect(exported.itemCount == 1, "CSV export reports one rule");
+    expect(exported.text.starts_with("\xEF\xBB\xBF"), "CSV export includes a UTF-8 BOM");
+    expect(exported.text.find("\"\"인용문\"\"") != std::string::npos,
+        "CSV export escapes embedded quotes");
+
+    const auto imported = nppqr::RuleExchange::importDelimited(
+        R"json({"version":1,"groups":[],"items":[]})json",
+        exported.text,
+        ',',
+        nppqr::DelimitedImportMode::replace);
+    expect(imported.ok, "exported CSV imports again");
+    expect(imported.itemCount == 1, "CSV import reports one rule");
+    if (imported.ok) {
+        const auto root = nlohmann::json::parse(imported.text);
+        const auto& item = root["items"][0];
+        expect(item["trigger"] == "인사,말", "CSV round-trip preserves Korean and commas");
+        expect(item["replacement"] == "첫째 줄\n\"인용문\", 둘째 줄",
+            "CSV round-trip preserves multiline quoted replacements");
+        expect(item["activation"] == nlohmann::json::array({"space", "enter"}),
+            "CSV round-trip preserves activation lists");
+        expect(item["fileExtensions"] == nlohmann::json::array({".md", ".txt"}),
+            "CSV round-trip preserves extension lists");
+        expect(root["groups"].size() == 1 && root["groups"][0]["id"] == "team",
+            "CSV import creates a referenced group");
+    }
+}
+
+void testDelimitedImportModesAndValidation() {
+    constexpr std::string_view existing = R"json({
+      "version":1,
+      "groups":[{"id":"old","name":"Old","enabled":true}],
+      "items":[{
+        "id":"same-id","trigger":"old","replacement":"old value",
+        "group":"old","activation":["space"]
+      }]
+    })json";
+    constexpr std::string_view tsv =
+        "id\tenabled\ttrigger\treplacement\tgroup\tactivation\tcaseSensitive\tfileExtensions\tdescription\r\n"
+        "same-id\tfalse\tnew\t새 값\timported\ttab|enter\tyes\tmd|TXT\t설명\r\n";
+
+    const auto replace = nppqr::RuleExchange::importDelimited(
+        existing, tsv, '\t', nppqr::DelimitedImportMode::replace);
+    expect(replace.ok, "replace import may reuse an id removed by replacement");
+    if (replace.ok) {
+        const auto root = nlohmann::json::parse(replace.text);
+        expect(root["items"].size() == 1 && root["items"][0]["trigger"] == "new",
+            "replace mode removes previous rules");
+        expect(root["items"][0]["enabled"] == false, "TSV boolean false is parsed");
+        expect(root["items"][0]["caseSensitive"] == true, "TSV yes boolean is parsed");
+        expect(root["items"][0]["fileExtensions"] == nlohmann::json::array({".md", ".TXT"}),
+            "TSV extension list is normalized with dots");
+    }
+
+    const auto appendConflict = nppqr::RuleExchange::importDelimited(
+        existing, tsv, '\t', nppqr::DelimitedImportMode::append);
+    expect(!appendConflict.ok, "append import rejects an existing id conflict");
+
+    const auto missingHeader = nppqr::RuleExchange::importDelimited(
+        existing, "id,name\r\n1,test\r\n", ',', nppqr::DelimitedImportMode::append);
+    expect(!missingHeader.ok, "import rejects a file without required headers");
+
+    const auto emptyReplacement = nppqr::RuleExchange::importDelimited(
+        existing, "trigger,replacement\r\nbad,\r\n", ',', nppqr::DelimitedImportMode::replace);
+    expect(!emptyReplacement.ok, "import rejects a row with an empty replacement");
+}
+
 void testTenThousandRules() {
     nlohmann::json root;
     root["version"] = 1;
@@ -254,6 +342,8 @@ int main() {
     testImmediateRulesAndPrefixSafety();
     testUnicodeNormalization();
     testConfigPreservationAndBackups();
+    testDelimitedExchangeRoundTrip();
+    testDelimitedImportModesAndValidation();
     testTenThousandRules();
 
     if (failures != 0) {

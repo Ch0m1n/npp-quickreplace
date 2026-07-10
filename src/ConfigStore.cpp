@@ -137,7 +137,7 @@ std::filesystem::path uniqueTemporaryPath(const std::filesystem::path& path) {
 
 bool writeHandle(HANDLE file, std::string_view content, std::string& error) {
     std::string payload(content);
-    payload.push_back('\n');
+    if (payload.empty() || payload.back() != '\n') payload.push_back('\n');
     std::size_t offset = 0;
     while (offset < payload.size()) {
         const std::size_t remaining = payload.size() - offset;

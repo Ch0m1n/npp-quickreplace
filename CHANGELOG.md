@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0-alpha - 2026-07-10
+
+- Add UTF-8 BOM CSV/TSV import and export with quoted comma, quote, and multiline field support.
+- Add append and replace import modes with full RuleStore validation before the draft changes.
+- Add a native group manager for create, rename, enable/disable, and safe delete workflows.
+- Update linked rules automatically when a group ID changes and ungroup rules when a group is deleted.
+- Add editable group selection and automatic group creation from typed IDs or imported data.
+- Add import/export controls to the rule manager and keep all imported changes draft-only until save.
+- Avoid appending a second newline when atomically writing already terminated CSV/TSV content.
+- Add round-trip, validation, import-mode, Korean text, and multiline exchange tests.
+
 ## 0.3.0-alpha - 2026-07-10
 
 - Add a searchable, sortable, DPI-aware Win32 rule manager with draft editing and dark-mode integration.

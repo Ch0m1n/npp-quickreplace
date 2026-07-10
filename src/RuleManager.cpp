@@ -17,7 +17,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "GroupManager.h"
 #include "Notepad_plus_msgs.h"
+#include "RuleExchange.h"
 #include "RuleStore.h"
 
 namespace nppqr {
@@ -35,6 +37,9 @@ enum ControlId : int {
     idAdd,
     idDuplicate,
     idDelete,
+    idManageGroups,
+    idImport,
+    idExport,
     idEnabled = 1010,
     idTrigger,
     idGroup,
@@ -254,7 +259,7 @@ private:
             return 0;
         }
         case WM_GETMINMAXINFO:
-            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {900, 620};
+            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {scale(900), scale(620)};
             return 0;
         case WM_COMMAND: onCommand(LOWORD(wParam), HIWORD(wParam)); return 0;
         case WM_NOTIFY: return onNotify(reinterpret_cast<NMHDR*>(lParam));
@@ -320,6 +325,7 @@ private:
         add_ = makeButton(L"Add rule", idAdd);
         duplicate_ = makeButton(L"Duplicate", idDuplicate);
         delete_ = makeButton(L"Delete", idDelete);
+        manageGroups_ = makeButton(L"Groups…", idManageGroups);
 
         detailsTitle_ = makeLabel(L"Rule details");
         detailsHint_ = makeLabel(L"Changes stay in the draft until you save the document.");
@@ -328,8 +334,8 @@ private:
         trigger_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idTrigger);
         groupLabel_ = makeLabel(L"Group ID");
-        group_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
-            WS_TABSTOP | ES_AUTOHSCROLL, idGroup);
+        group_ = makeControl(WS_EX_CLIENTEDGE, WC_COMBOBOXW, L"",
+            WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL, idGroup);
         activationLabel_ = makeLabel(L"Replace when");
         space_ = makeButton(L"Space", idSpace, BS_AUTOCHECKBOX);
         enter_ = makeButton(L"Enter", idEnter, BS_AUTOCHECKBOX);
@@ -359,11 +365,14 @@ private:
         reload_ = makeButton(L"Reload from disk", idReload);
         restore_ = makeButton(L"Restore backup…", idRestore);
         openJson_ = makeButton(L"Open JSON", idOpenJson);
+        import_ = makeButton(L"Import…", idImport);
+        export_ = makeButton(L"Export…", idExport);
         close_ = makeButton(L"Close", idClose);
 
         updateFonts();
         if (!loadDocument(true)) {
             populateGroupFilter();
+            populateGroupEditor();
             refreshList();
         }
         setDetailsEnabled(false);
@@ -421,6 +430,7 @@ private:
         place(add_, margin, actionY, scale(96), scale(30));
         place(duplicate_, margin + scale(104), actionY, scale(92), scale(30));
         place(delete_, margin + scale(204), actionY, scale(82), scale(30));
+        place(manageGroups_, margin + scale(294), actionY, scale(94), scale(30));
 
         place(detailsTitle_, rightX, margin, rightWidth, scale(26));
         place(detailsHint_, rightX, margin + scale(28), rightWidth, scale(20));
@@ -430,7 +440,7 @@ private:
         place(triggerLabel_, rightX, fieldsY, half, scale(18));
         place(groupLabel_, rightX + half + scale(12), fieldsY, half, scale(18));
         place(trigger_, rightX, fieldsY + scale(20), half, row);
-        place(group_, rightX + half + scale(12), fieldsY + scale(20), half, row);
+        place(group_, rightX + half + scale(12), fieldsY + scale(20), half, scale(220));
 
         const int activationY = fieldsY + scale(58);
         place(activationLabel_, rightX, activationY, rightWidth, scale(18));
@@ -465,6 +475,8 @@ private:
         place(reload_, margin + scale(128), footerY, scale(128), scale(32));
         place(restore_, margin + scale(266), footerY, scale(132), scale(32));
         place(openJson_, margin + scale(408), footerY, scale(100), scale(32));
+        place(import_, margin + scale(518), footerY, scale(88), scale(32));
+        place(export_, margin + scale(616), footerY, scale(88), scale(32));
         place(close_, width - margin - scale(90), footerY, scale(90), scale(32));
         RECT listClient{};
         ::GetClientRect(list_, &listClient);
@@ -516,6 +528,7 @@ private:
             detailsDirty_ = false;
             selectedDocumentIndex_.reset();
             populateGroupFilter();
+            populateGroupEditor();
             refreshList();
             setDetailsEnabled(false);
             updateWindowTitle();
@@ -553,6 +566,26 @@ private:
             }
         }
         ::SendMessageW(groupFilter_, CB_SETCURSEL, 0, 0);
+        loading_ = false;
+    }
+
+    void populateGroupEditor() {
+        if (group_ == nullptr) return;
+        const std::wstring current = windowText(group_);
+        loading_ = true;
+        ::SendMessageW(group_, CB_RESETCONTENT, 0, 0);
+        const auto groups = document_.find("groups");
+        if (groups != document_.end() && groups->is_array()) {
+            for (const auto& group : *groups) {
+                if (!group.is_object()) continue;
+                const std::string id = group.value("id", "");
+                if (id.empty()) continue;
+                const std::wstring wideId = utf8ToWide(id);
+                ::SendMessageW(
+                    group_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wideId.c_str()));
+            }
+        }
+        setText(group_, current);
         loading_ = false;
     }
 
@@ -709,6 +742,7 @@ private:
         const std::size_t index = *selectedDocumentIndex_;
         if (index >= document_["items"].size()) return false;
         Json oldItem = document_["items"][index];
+        Json oldGroups = document_.value("groups", Json::array());
         Json& item = document_["items"][index];
         const std::string trigger = wideToUtf8(windowText(trigger_));
         const std::string replacement = wideToUtf8(windowText(replacement_));
@@ -721,7 +755,25 @@ private:
         item["enabled"] = isChecked(enabled_);
         item["trigger"] = trigger;
         item["replacement"] = replacement;
-        item["group"] = wideToUtf8(trimWide(windowText(group_)));
+        const std::string groupId = wideToUtf8(trimWide(windowText(group_)));
+        bool groupCreated = false;
+        if (!groupId.empty()) {
+            if (!document_.contains("groups") || !document_["groups"].is_array()) {
+                document_["groups"] = Json::array();
+            }
+            const bool exists = std::any_of(
+                document_["groups"].begin(),
+                document_["groups"].end(),
+                [&](const Json& group) {
+                    return group.is_object() && group.value("id", "") == groupId;
+                });
+            if (!exists) {
+                document_["groups"].push_back(
+                    {{"id", groupId}, {"name", groupId}, {"enabled", true}});
+                groupCreated = true;
+            }
+        }
+        item["group"] = groupId;
         item["matchMode"] = "wholeWord";
         item["caseSensitive"] = isChecked(caseSensitive_);
         item["description"] = wideToUtf8(windowText(description_));
@@ -744,6 +796,7 @@ private:
         const RuleLoadResult validation = validator.loadFromText(document_.dump());
         if (!validation.ok) {
             item = std::move(oldItem);
+            document_["groups"] = std::move(oldGroups);
             if (showError) {
                 showMessage(L"This draft change is not valid yet.\n\n" +
                     utf8ToWide(validation.error), MB_ICONWARNING);
@@ -754,9 +807,16 @@ private:
         detailsDirty_ = false;
         dirty_ = true;
         updateWindowTitle();
-        setDetailStatus(validation.warnings.empty()
-            ? L"Applied to draft. Save changes to write the file."
-            : L"Applied with " + std::to_wstring(validation.warnings.size()) + L" warning(s).");
+        if (groupCreated) {
+            populateGroupFilter();
+            populateGroupEditor();
+            setText(group_, utf8ToWide(groupId));
+            setDetailStatus(L"Applied to draft and created group '" + utf8ToWide(groupId) + L"'.");
+        } else {
+            setDetailStatus(validation.warnings.empty()
+                ? L"Applied to draft. Save changes to write the file."
+                : L"Applied with " + std::to_wstring(validation.warnings.size()) + L" warning(s).");
+        }
         if (refresh) {
             refreshList();
             selectDocumentIndex(index);
@@ -891,6 +951,151 @@ private:
         loadDocument(true);
     }
 
+    void manageGroups() {
+        if (!commitDetails(true, false)) return;
+        const auto selected = selectedDocumentIndex_;
+        if (!showGroupManager(
+                window_, options_.notepadHandle, options_.module, document_)) {
+            return;
+        }
+        dirty_ = true;
+        detailsDirty_ = false;
+        populateGroupFilter();
+        populateGroupEditor();
+        refreshList();
+        if (selected.has_value() && *selected < document_["items"].size()) {
+            loadDetails(*selected);
+            selectDocumentIndex(*selected);
+        } else {
+            selectedDocumentIndex_.reset();
+            setDetailsEnabled(false);
+        }
+        updateWindowTitle();
+        setDetailStatus(L"Group changes applied to the draft. Save changes to write the file.");
+    }
+
+    void importRules() {
+        if (!commitDetails(true, false)) return;
+        wchar_t path[32768]{};
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = window_;
+        dialog.lpstrFilter =
+            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0";
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+        dialog.lpstrInitialDir = options_.dataDirectory.c_str();
+        dialog.nFilterIndex = 1;
+        dialog.Flags =
+            OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_DONTADDTORECENT | OFN_EXPLORER;
+        if (!::GetOpenFileNameW(&dialog)) return;
+
+        const std::filesystem::path selectedPath(path);
+        const std::wstring extension = lowerWide(selectedPath.extension().wstring());
+        const char delimiter = extension == L".tsv" || dialog.nFilterIndex == 2 ? '\t' : ',';
+
+        std::string content;
+        std::string error;
+        if (!ConfigStore::readUtf8File(selectedPath, content, error)) {
+            showMessage(L"The import file could not be read.\n\n" + utf8ToWide(error), MB_ICONERROR);
+            return;
+        }
+        const int choice = ::MessageBoxW(
+            window_,
+            L"How should these rules be imported?\n\n"
+            L"Yes  — append to the current draft\n"
+            L"No   — replace every rule in the current draft\n"
+            L"Cancel — leave the draft unchanged",
+            kWindowTitle,
+            MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) return;
+        const DelimitedImportMode mode =
+            choice == IDYES ? DelimitedImportMode::append : DelimitedImportMode::replace;
+
+        const RuleExchangeResult imported =
+            RuleExchange::importDelimited(document_.dump(), content, delimiter, mode);
+        if (!imported.ok) {
+            showMessage(L"The rules could not be imported.\n\n" +
+                utf8ToWide(imported.error), MB_ICONERROR);
+            return;
+        }
+        try {
+            document_ = Json::parse(imported.text);
+        } catch (const std::exception& exception) {
+            showMessage(L"The imported draft could not be opened.\n\n" +
+                utf8ToWide(exception.what()), MB_ICONERROR);
+            return;
+        }
+
+        dirty_ = true;
+        detailsDirty_ = false;
+        selectedDocumentIndex_.reset();
+        loading_ = true;
+        setText(search_, L"");
+        loading_ = false;
+        populateGroupFilter();
+        populateGroupEditor();
+        refreshList();
+        setDetailsEnabled(false);
+        updateWindowTitle();
+
+        std::wstring status =
+            (mode == DelimitedImportMode::append ? L"Appended " : L"Replaced the draft with ") +
+            std::to_wstring(imported.itemCount) + L" imported rule(s)";
+        if (!imported.warnings.empty()) {
+            status += L" · " + std::to_wstring(imported.warnings.size()) + L" warning(s)";
+        }
+        setDetailStatus(status + L". Save changes to write the file.");
+    }
+
+    void exportRules() {
+        if (!commitDetails(true, false)) return;
+        wchar_t path[32768]{};
+        ::wcscpy_s(path, L"NppQuickReplace-rules.csv");
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = window_;
+        dialog.lpstrFilter =
+            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0\0";
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+        dialog.lpstrInitialDir = options_.dataDirectory.c_str();
+        dialog.lpstrDefExt = L"csv";
+        dialog.nFilterIndex = 1;
+        dialog.Flags =
+            OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_DONTADDTORECENT |
+            OFN_EXPLORER | OFN_NOREADONLYRETURN;
+        if (!::GetSaveFileNameW(&dialog)) return;
+
+        std::filesystem::path selectedPath(path);
+        std::wstring extension = lowerWide(selectedPath.extension().wstring());
+        if (dialog.nFilterIndex == 2 && extension != L".tsv") {
+            selectedPath.replace_extension(L".tsv");
+            extension = L".tsv";
+        } else if (extension.empty()) {
+            selectedPath.replace_extension(L".csv");
+            extension = L".csv";
+        }
+        const char delimiter = extension == L".tsv" ? '\t' : ',';
+        const RuleExchangeResult exported =
+            RuleExchange::exportDelimited(document_.dump(), delimiter);
+        if (!exported.ok) {
+            showMessage(L"The rules could not be exported.\n\n" +
+                utf8ToWide(exported.error), MB_ICONERROR);
+            return;
+        }
+
+        std::string error;
+        if (!ConfigStore::writeUtf8FileAtomic(selectedPath, exported.text, error)) {
+            showMessage(L"The export file could not be written.\n\n" +
+                utf8ToWide(error), MB_ICONERROR);
+            return;
+        }
+        setDetailStatus(
+            L"Exported " + std::to_wstring(exported.itemCount) + L" rule(s) to " +
+            selectedPath.filename().wstring() + L".");
+    }
+
     void restoreBackup() {
         wchar_t path[32768]{};
         const std::filesystem::path backupDirectory = options_.dataDirectory / "backups";
@@ -958,8 +1163,11 @@ private:
             refreshList();
             return;
         }
-        if ((id == idTrigger || id == idGroup || id == idExtensions ||
-             id == idReplacement || id == idDescription) && notification == EN_CHANGE) {
+        const bool textChanged = (id == idTrigger || id == idExtensions ||
+            id == idReplacement || id == idDescription) && notification == EN_CHANGE;
+        const bool groupChanged = id == idGroup &&
+            (notification == CBN_EDITCHANGE || notification == CBN_SELCHANGE);
+        if (textChanged || groupChanged) {
             detailsDirty_ = selectedDocumentIndex_.has_value();
             if (detailsDirty_) setDetailStatus(L"Draft detail has unapplied changes.");
             updateWindowTitle();
@@ -978,11 +1186,14 @@ private:
         case idAdd: addRule(); break;
         case idDuplicate: duplicateRule(); break;
         case idDelete: deleteSelectedRules(); break;
+        case idManageGroups: manageGroups(); break;
         case idApplyDraft: commitDetails(true, true); break;
         case idSave: saveDocument(); break;
         case idReload: reloadFromDisk(); break;
         case idRestore: restoreBackup(); break;
         case idOpenJson: openJson(); break;
+        case idImport: importRules(); break;
+        case idExport: exportRules(); break;
         case idClose: ::SendMessageW(window_, WM_CLOSE, 0, 0); break;
         default: break;
         }
@@ -1065,6 +1276,7 @@ private:
     HWND add_ = nullptr;
     HWND duplicate_ = nullptr;
     HWND delete_ = nullptr;
+    HWND manageGroups_ = nullptr;
     HWND detailsTitle_ = nullptr;
     HWND detailsHint_ = nullptr;
     HWND enabled_ = nullptr;
@@ -1093,6 +1305,8 @@ private:
     HWND reload_ = nullptr;
     HWND restore_ = nullptr;
     HWND openJson_ = nullptr;
+    HWND import_ = nullptr;
+    HWND export_ = nullptr;
     HWND close_ = nullptr;
 };
 

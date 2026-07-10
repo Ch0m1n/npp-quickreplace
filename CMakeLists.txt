@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   NppQuickReplace
-  VERSION 0.3.0
+  VERSION 0.4.0
   DESCRIPTION "Fast, local text expansion for Notepad++"
   LANGUAGES CXX RC
 )
@@ -19,6 +19,7 @@ endif()
 
 add_library(NppQuickReplaceCore STATIC
   src/ConfigStore.cpp
+  src/RuleExchange.cpp
   src/RuleStore.cpp
 )
 
@@ -38,6 +39,7 @@ target_compile_definitions(NppQuickReplaceCore
 )
 
 add_library(NppQuickReplace SHARED
+  src/GroupManager.cpp
   src/Plugin.cpp
   src/RuleManager.cpp
   src/NppQuickReplace.rc

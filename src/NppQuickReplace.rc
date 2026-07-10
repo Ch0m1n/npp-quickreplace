@@ -2,8 +2,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,3,0,0
- PRODUCTVERSION 0,3,0,0
+ FILEVERSION 0,4,0,0
+ PRODUCTVERSION 0,4,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -20,12 +20,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NppQuickReplace contributors\0"
             VALUE "FileDescription", "Fast, local text expansion for Notepad++\0"
-            VALUE "FileVersion", "0.3.0-alpha\0"
+            VALUE "FileVersion", "0.4.0-alpha\0"
             VALUE "InternalName", "NppQuickReplace\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 NppQuickReplace contributors\0"
             VALUE "OriginalFilename", "NppQuickReplace.dll\0"
             VALUE "ProductName", "NppQuickReplace\0"
-            VALUE "ProductVersion", "0.3.0-alpha\0"
+            VALUE "ProductVersion", "0.4.0-alpha\0"
         END
     END
     BLOCK "VarFileInfo"
