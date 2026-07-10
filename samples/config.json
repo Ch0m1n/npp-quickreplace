@@ -1,0 +1,14 @@
+{
+  "pluginEnabled": true,
+  "rememberEnabledState": true,
+  "punctuationTriggers": ".,:;!?)]}",
+  "processPaste": false,
+  "skipReadOnlyDocuments": true,
+  "skipMultiSelection": true,
+  "maxTriggerBytes": 512,
+  "logging": {
+    "enabled": false,
+    "level": "warning"
+  }
+}
+

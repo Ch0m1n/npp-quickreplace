@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "common",
+      "name": "공통",
+      "enabled": true
+    },
+    {
+      "id": "wows",
+      "name": "World of Warships",
+      "enabled": true
+    },
+    {
+      "id": "templates",
+      "name": "작업 템플릿",
+      "enabled": true
+    }
+  ],
+  "items": [
+    {
+      "id": "sample-wows-aa",
+      "enabled": true,
+      "trigger": "ㄱ123",
+      "replacement": "대공 방어 사격",
+      "group": "wows",
+      "matchMode": "wholeWord",
+      "caseSensitive": false,
+      "activation": ["space", "enter", "tab", "punctuation"],
+      "fileExtensions": [],
+      "description": "샘플 한글/숫자 혼합 축약어"
+    },
+    {
+      "id": "sample-thanks",
+      "enabled": true,
+      "trigger": "ㅅㄱㅈ",
+      "replacement": "수고하셨습니다.",
+      "group": "common",
+      "matchMode": "wholeWord",
+      "caseSensitive": false,
+      "activation": ["space", "enter"],
+      "fileExtensions": []
+    },
+    {
+      "id": "sample-patch-template",
+      "enabled": true,
+      "trigger": "patchtpl",
+      "replacement": "변경 전:\n변경 후:\n변경 사유: ${cursor}",
+      "group": "templates",
+      "matchMode": "wholeWord",
+      "caseSensitive": false,
+      "activation": ["space", "enter", "tab"],
+      "fileExtensions": [".txt", ".md"]
+    }
+  ]
+}
+
