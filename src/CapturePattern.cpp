@@ -73,6 +73,15 @@ CapturePattern::CompileResult CapturePattern::compile(
     return {.ok = true};
 }
 
+std::optional<unsigned char> CapturePattern::leadingByte() const noexcept {
+    if (tokens_.empty() || tokens_.front().capture || tokens_.front().text.empty()) {
+        return std::nullopt;
+    }
+    unsigned char value = static_cast<unsigned char>(tokens_.front().text.front());
+    if (value < 0x80U) value = static_cast<unsigned char>(std::tolower(value));
+    return value;
+}
+
 CapturePattern::CompileResult CapturePattern::validateReplacement(
     std::string_view replacement) const {
     std::size_t position = replacement.find(kCapturePrefix);

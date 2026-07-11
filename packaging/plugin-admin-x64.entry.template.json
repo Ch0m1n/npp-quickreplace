@@ -1,10 +1,10 @@
 {
   "folder-name": "NppQuickReplace",
   "display-name": "NppQuickReplace",
-  "version": "0.6.0.0",
+  "version": "0.7.0.0",
   "npp-compatible-versions": "[8.5.3,]",
   "id": "REPLACE_WITH_NPPQUICKREPLACE_DLL_SHA256",
-  "repository": "https://github.com/Ch0m1n/npp-quickreplace/releases/download/v0.6.0/NppQuickReplace-0.6.0-x64.zip",
+  "repository": "https://github.com/Ch0m1n/npp-quickreplace/releases/download/v0.7.0/NppQuickReplace-0.7.0-x64.zip",
   "description": "Fast, offline trigger and capture-template text expansion with native rule management, tabstops, and multi-cursor support.",
   "author": "Ch0m1n",
   "homepage": "https://github.com/Ch0m1n/npp-quickreplace"

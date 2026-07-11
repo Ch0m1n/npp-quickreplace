@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   NppQuickReplace
-  VERSION 0.6.0
+  VERSION 0.7.0
   DESCRIPTION "Fast, local text expansion for Notepad++"
   LANGUAGES CXX RC
 )
@@ -21,6 +21,7 @@ add_library(NppQuickReplaceCore STATIC
   src/CapturePattern.cpp
   src/SnippetTemplate.cpp
   src/ConfigStore.cpp
+  src/DataPackage.cpp
   src/Localization.cpp
   src/RuleExchange.cpp
   src/RuleStore.cpp
@@ -45,9 +46,11 @@ target_compile_definitions(NppQuickReplaceCore
 
 add_library(NppQuickReplace SHARED
   src/GroupManager.cpp
+  src/SettingsManager.cpp
   src/Plugin.cpp
   src/RuleManager.cpp
   src/NppQuickReplace.rc
+  src/RuleTester.cpp
 )
 
 target_include_directories(NppQuickReplace
@@ -124,7 +127,11 @@ install(FILES
 set(CPACK_GENERATOR ZIP)
 set(CPACK_PACKAGE_NAME "NppQuickReplace")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_PACKAGE_FILE_NAME "NppQuickReplace-${PROJECT_VERSION}-x64")
+set(NPPQR_PACKAGE_ARCH "x64")
+if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+  set(NPPQR_PACKAGE_ARCH "arm64")
+endif()
+set(CPACK_PACKAGE_FILE_NAME "NppQuickReplace-${PROJECT_VERSION}-${NPPQR_PACKAGE_ARCH}")
 set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 include(CPack)
 

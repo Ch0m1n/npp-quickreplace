@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -55,6 +56,15 @@ struct RuleLoadResult {
     std::vector<std::string> warnings;
 };
 
+struct RuleDiagnosticResult {
+    const ReplacementRule* matchedRule = nullptr;
+    CaptureMatch captures{};
+    bool captureMatch = false;
+    std::size_t triggerMatchCount = 0;
+    std::size_t eligibleMatchCount = 0;
+    std::vector<std::string> blockers;
+};
+
 class RuleStore {
 public:
     RuleLoadResult loadFromFile(const std::filesystem::path& path);
@@ -97,6 +107,14 @@ public:
 
     [[nodiscard]] static std::string foldAscii(std::string_view value);
 
+    [[nodiscard]] RuleDiagnosticResult diagnose(
+        std::string_view trigger,
+        Activation activation,
+        std::string_view currentExtension = {},
+        std::string_view currentPath = {},
+        std::string_view currentLanguage = {},
+        bool manual = false) const;
+
 private:
     struct TransparentStringHash {
         using is_transparent = void;
@@ -132,7 +150,8 @@ private:
     std::vector<ReplacementRule> rules_;
     RuleIndex exactIndex_;
     RuleIndex foldedIndex_;
-    std::vector<std::size_t> captureTemplateIndices_;
+    std::array<std::vector<std::size_t>, 256> captureTemplateBuckets_;
+    std::vector<std::size_t> captureTemplateFallback_;
     bool hasImmediateRules_ = false;
 };
 

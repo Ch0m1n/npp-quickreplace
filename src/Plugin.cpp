@@ -20,6 +20,7 @@
 #include "ConfigStore.h"
 #include "Localization.h"
 #include "RuleManager.h"
+#include "SettingsManager.h"
 #include "RuleStore.h"
 #include "SnippetTemplate.h"
 #include "PluginInterface.h"
@@ -28,6 +29,7 @@ namespace {
 
 using nppqr::Activation;
 using nppqr::CaptureMatch;
+using nppqr::FileStamp;
 using nppqr::ConfigStore;
 using nppqr::PluginConfig;
 using nppqr::ReplacementRule;
@@ -35,8 +37,8 @@ using nppqr::RuleManagerOptions;
 using nppqr::RuleStore;
 
 constexpr wchar_t kPluginName[] = L"NppQuickReplace";
-constexpr wchar_t kPluginVersion[] = L"0.6.0-alpha";
-constexpr int kCommandCount = 7;
+constexpr wchar_t kPluginVersion[] = L"0.7.0-alpha";
+constexpr int kCommandCount = 8;
 
 enum CommandIndex : int {
     commandToggleEnabled = 0,
@@ -45,6 +47,7 @@ enum CommandIndex : int {
     commandReload,
     commandManageReplacements,
     commandOpenDataFolder,
+    commandSettings,
     commandAbout,
 };
 
@@ -69,6 +72,9 @@ std::wstring gPunctuationCharacters;
 bool gReady = false;
 bool gInternalEdit = false;
 bool gConfigValid = false;
+FileStamp gRulesStamp{};
+UINT_PTR gAutoReloadTimer = 0;
+
 
 const wchar_t* tr(const wchar_t* english, const wchar_t* korean) noexcept {
     return nppqr::localization::text(english, korean);
@@ -858,6 +864,14 @@ void updatePunctuationCache() {
     gPunctuationCharacters = normalizeNfc(utf8ToWide(gConfig.punctuationTriggers));
 }
 
+void updateRulesStamp() {
+    std::string error;
+    if (!ConfigStore::fileStamp(gReplacementsPath, gRulesStamp, error)) {
+        gRulesStamp = {};
+        logMessage(L"warning", L"Could not inspect replacements.json: " + utf8ToWide(error));
+    }
+}
+
 bool loadRules(bool showResult) {
     const nppqr::RuleLoadResult primary = gRules.loadFromFile(gReplacementsPath);
     if (primary.ok) {
@@ -872,6 +886,7 @@ bool loadRules(bool showResult) {
         if (!primary.warnings.empty()) {
             logMessage(L"warning", L"Rules loaded with " + std::to_wstring(primary.warnings.size()) + L" warning(s).");
         }
+        updateRulesStamp();
         return true;
     }
 
@@ -883,6 +898,7 @@ bool loadRules(bool showResult) {
                 L"replacements.json을 불러올 수 없어요.\n\n대신 가장 최근의 유효한 백업을 메모리에 불러왔어요. 원본 파일은 덮어쓰지 않았어요.\n\n")) +
                 utf8ToWide(primary.error), MB_ICONWARNING);
             logMessage(L"error", L"Loaded rules from backup after replacements.json failed validation.");
+            updateRulesStamp();
             return true;
         }
     }
@@ -893,12 +909,58 @@ bool loadRules(bool showResult) {
     return false;
 }
 
+void CALLBACK autoReloadTimer(HWND, UINT, UINT_PTR, DWORD) {
+    if (!gReady || !gConfig.autoReloadRules || gReplacementsPath.empty()) return;
+    try {
+        FileStamp current{};
+        std::string error;
+        if (!ConfigStore::fileStamp(gReplacementsPath, current, error)) {
+            logMessage(L"warning", L"Automatic rule reload could not inspect the file: " +
+                utf8ToWide(error));
+            return;
+        }
+        if (current == gRulesStamp) return;
+
+        RuleStore candidate;
+        const nppqr::RuleLoadResult result = candidate.loadFromFile(gReplacementsPath);
+        gRulesStamp = current;
+        if (!result.ok) {
+            logMessage(L"error",
+                L"Automatic rule reload kept the current rules because the changed file is invalid: " +
+                utf8ToWide(result.error));
+            return;
+        }
+        gRules = std::move(candidate);
+        logMessage(L"info", L"Automatically reloaded " +
+            std::to_wstring(result.loadedCount) + L" replacement rule(s).");
+    } catch (const std::exception& exception) {
+        logMessage(L"error", L"Unexpected automatic rule reload error: " +
+            utf8ToWide(exception.what()));
+    } catch (...) {
+        logMessage(L"error", L"Unexpected non-standard automatic rule reload error.");
+    }
+}
+
+void configureAutoReloadTimer() {
+    if (gAutoReloadTimer != 0) {
+        ::KillTimer(nullptr, gAutoReloadTimer);
+        gAutoReloadTimer = 0;
+    }
+    if (!gReady || !gConfig.autoReloadRules) return;
+    gAutoReloadTimer = ::SetTimer(nullptr, 0,
+        static_cast<UINT>(gConfig.autoReloadIntervalMs), autoReloadTimer);
+    if (gAutoReloadTimer == 0) {
+        logMessage(L"warning", L"Could not start the automatic rule reload timer.");
+    }
+}
+
 bool loadConfiguration(bool showWarnings) {
     PluginConfig loaded;
     const nppqr::ConfigLoadResult result = ConfigStore::loadConfig(gConfigPath, loaded);
     gConfigValid = result.ok;
     if (!result.ok) {
         gConfig = PluginConfig{};
+        nppqr::localization::setLanguagePreference(gConfig.uiLanguage);
         updatePunctuationCache();
         showMessage(std::wstring(tr(
             L"config.json is invalid. Safe in-memory defaults are active, and the existing file was not overwritten.\n\n",
@@ -908,6 +970,7 @@ bool loadConfiguration(bool showWarnings) {
     }
     gConfig = std::move(loaded);
     updatePunctuationCache();
+    nppqr::localization::setLanguagePreference(gConfig.uiLanguage);
     if (showWarnings && !result.warnings.empty()) {
         showMessage(std::wstring(tr(L"Configuration loaded with warnings:",
             L"설정을 경고와 함께 불러왔어요:")) + warningSummary(result.warnings), MB_ICONWARNING);
@@ -915,18 +978,32 @@ bool loadConfiguration(bool showWarnings) {
     return true;
 }
 
-bool initializePlugin() {
+bool resolveDataPaths() {
+    if (!gDataDirectory.empty()) return true;
+    if (gNppData._nppHandle == nullptr) return false;
     std::vector<wchar_t> configDirectory(32768, L'\0');
     const LRESULT length = ::SendMessageW(gNppData._nppHandle, NPPM_GETPLUGINSCONFIGDIR,
         static_cast<WPARAM>(configDirectory.size()), reinterpret_cast<LPARAM>(configDirectory.data()));
-    if (length <= 0 || configDirectory.front() == L'\0') {
+    if (length <= 0 || configDirectory.front() == L'\0') return false;
+    gDataDirectory = std::filesystem::path(configDirectory.data()) / kPluginName;
+    gConfigPath = gDataDirectory / "config.json";
+    gReplacementsPath = gDataDirectory / "replacements.json";
+    return true;
+}
+
+void loadLanguagePreferenceEarly() {
+    if (!resolveDataPaths() || !std::filesystem::exists(gConfigPath)) return;
+    PluginConfig earlyConfig;
+    const nppqr::ConfigLoadResult result = ConfigStore::loadConfig(gConfigPath, earlyConfig);
+    if (result.ok) nppqr::localization::setLanguagePreference(earlyConfig.uiLanguage);
+}
+
+bool initializePlugin() {
+    if (!resolveDataPaths()) {
         showMessage(tr(L"Notepad++ did not provide a plugin configuration directory.",
             L"Notepad++에서 플러그인 설정 폴더를 제공하지 않았어요."), MB_ICONERROR);
         return false;
     }
-    gDataDirectory = std::filesystem::path(configDirectory.data()) / kPluginName;
-    gConfigPath = gDataDirectory / "config.json";
-    gReplacementsPath = gDataDirectory / "replacements.json";
     std::string error;
     if (!ConfigStore::ensureDataFiles(gDataDirectory, error)) {
         showError(error);
@@ -937,6 +1014,7 @@ bool initializePlugin() {
     refreshBufferContext(currentBufferId());
     gReady = true;
     refreshMenuChecks();
+    configureAutoReloadTimer();
     return true;
 }
 
@@ -1079,6 +1157,36 @@ void manageReplacements() {
     });
 }
 
+void applySavedSettings(const PluginConfig& config) {
+    gConfig = config;
+    gConfigValid = true;
+    updatePunctuationCache();
+    configureAutoReloadTimer();
+    refreshMenuChecks();
+}
+void reloadAfterPackageImport() {
+    loadConfiguration(false);
+    loadRules(false);
+    gExtensionCache.clear();
+    refreshBufferContext(currentBufferId());
+    configureAutoReloadTimer();
+    refreshMenuChecks();
+}
+
+void manageSettings() {
+    if (!gReady) return;
+    nppqr::showSettingsManager(nppqr::SettingsManagerOptions{
+        .notepadHandle = gNppData._nppHandle,
+        .module = gModule,
+        .dataDirectory = gDataDirectory,
+        .replacementsPath = gReplacementsPath,
+        .configPath = gConfigPath,
+        .config = gConfig,
+        .onDataImported = reloadAfterPackageImport,
+        .onSaved = applySavedSettings,
+    });
+}
+
 void openDataFolder() {
     if (!gDataDirectory.empty()) {
         ::ShellExecuteW(gNppData._nppHandle, L"open", gDataDirectory.c_str(),
@@ -1119,6 +1227,8 @@ void initializeCommands() {
         tr(L"Manage replacement rules…", L"치환 규칙 관리…"), manageReplacements);
     setCommand(commandOpenDataFolder,
         tr(L"Open data folder", L"데이터 폴더 열기"), openDataFolder);
+    setCommand(commandSettings,
+        tr(L"Settings…", L"설정…"), manageSettings);
     setCommand(commandAbout,
         tr(L"About NppQuickReplace", L"NppQuickReplace 정보"), showAbout);
 }
@@ -1142,6 +1252,7 @@ BOOL APIENTRY DllMain(HINSTANCE module, DWORD reason, LPVOID) {
 
 extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData) {
     gNppData = notepadPlusData;
+    loadLanguagePreferenceEarly();
     initializeCommands();
 }
 
@@ -1173,12 +1284,18 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notification) {
             break;
         case NPPN_DARKMODECHANGED:
             nppqr::handleRuleManagerDarkModeChange();
+            nppqr::handleSettingsManagerDarkModeChange();
             break;
         case NPPN_SHUTDOWN:
             saveEnabledState();
+            if (gAutoReloadTimer != 0) {
+                ::KillTimer(nullptr, gAutoReloadTimer);
+                gAutoReloadTimer = 0;
+            }
             gReady = false;
             gTabstopSessions.clear();
             nppqr::closeRuleManager(true);
+            nppqr::closeSettingsManager(true);
             break;
         case SCN_CHARADDED:
             processCharacterAdded(*notification);

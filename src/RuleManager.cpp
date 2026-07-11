@@ -23,6 +23,7 @@
 #include "Notepad_plus_msgs.h"
 #include "RuleExchange.h"
 #include "RuleStore.h"
+#include "RuleTester.h"
 
 namespace nppqr {
 namespace {
@@ -45,6 +46,7 @@ enum ControlId : int {
     idDelete,
     idManageGroups,
     idSetState,
+    idTestRules = 1040,
     idImport,
     idExport,
     idEnabled = 1010,
@@ -319,7 +321,7 @@ private:
             return 0;
         }
         case WM_GETMINMAXINFO:
-            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {scale(900), scale(680)};
+            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {scale(1050), scale(680)};
             return 0;
         case WM_COMMAND: onCommand(LOWORD(wParam), HIWORD(wParam)); return 0;
         case WM_NOTIFY: return onNotify(reinterpret_cast<NMHDR*>(lParam));
@@ -454,6 +456,8 @@ private:
         delete_ = makeButton(L"Delete", idDelete);
         manageGroups_ = makeButton(L"&Groups…", idManageGroups);
         setState_ = makeButton(L"Set &state…", idSetState);
+        testRules_ = makeButton(localization::text(
+            L"Test rules…", L"규칙 테스트…"), idTestRules);
 
         detailsTitle_ = makeLabel(L"Rule details");
         detailsHint_ = makeLabel(L"Changes stay in the draft until you save the document.");
@@ -623,6 +627,7 @@ private:
         place(restore_, margin + scale(266), footerY, scale(132), scale(32));
         place(openJson_, margin + scale(408), footerY, scale(100), scale(32));
         place(import_, margin + scale(518), footerY, scale(88), scale(32));
+        place(testRules_, margin + scale(714), footerY, scale(104), scale(32));
         place(export_, margin + scale(616), footerY, scale(88), scale(32));
         place(close_, width - margin - scale(90), footerY, scale(90), scale(32));
         RECT listClient{};
@@ -1278,6 +1283,11 @@ private:
         }
     }
 
+    void testRules() {
+        if (!commitDetails(true, false)) return;
+        showRuleTester(window_, options_.notepadHandle, options_.module, document_.dump());
+    }
+
     void importRules() {
         if (!commitDetails(true, false)) return;
         wchar_t path[32768]{};
@@ -1544,6 +1554,7 @@ private:
         case idDuplicate: duplicateRule(); break;
         case idDelete: deleteSelectedRules(); break;
         case idManageGroups: manageGroups(); break;
+        case idTestRules: testRules(); break;
         case idSetState: setSelectedState(); break;
         case idPreview: previewCurrentRule(); break;
         case idApplyDraft: commitDetails(true, true); break;
@@ -1656,6 +1667,7 @@ private:
     HWND duplicate_ = nullptr;
     HWND delete_ = nullptr;
     HWND manageGroups_ = nullptr;
+    HWND testRules_ = nullptr;
     HWND setState_ = nullptr;
     HWND detailsTitle_ = nullptr;
     HWND detailsHint_ = nullptr;
@@ -1714,6 +1726,7 @@ void showRuleManager(const RuleManagerOptions& options) {
 }
 
 void closeRuleManager(bool discardChanges) {
+    closeRuleTester();
     if (gManagerWindow != nullptr) {
         gDiscardManagerChanges = discardChanges;
         ::SendMessageW(gManagerWindow, WM_CLOSE, 0, 0);
@@ -1726,6 +1739,7 @@ void handleRuleManagerDarkModeChange() {
             ::GetWindowLongPtrW(gManagerWindow, GWLP_USERDATA));
         if (manager != nullptr) manager->handleDarkModeChange();
     }
+    handleRuleTesterDarkModeChange();
     handleGroupManagerDarkModeChange();
 }
 

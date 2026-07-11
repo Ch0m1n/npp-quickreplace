@@ -74,6 +74,23 @@ function Find-MenuCommand([IntPtr]$Menu, [string]$Text) {
     return $null
 }
 
+function Find-SubMenu([IntPtr]$Menu, [string]$Text) {
+    if ($Menu -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+    $count = [NppQrNative]::GetMenuItemCount($Menu)
+    for ($index = 0; $index -lt $count; $index++) {
+        $buffer = [Text.StringBuilder]::new(512)
+        [void][NppQrNative]::GetMenuString($Menu, [uint32]$index, $buffer, $buffer.Capacity, 0x400)
+        $label = $buffer.ToString().Replace('&','')
+        $subMenu = [NppQrNative]::GetSubMenu($Menu, $index)
+        if ($subMenu -ne [IntPtr]::Zero -and $label -like "*$Text*") { return $subMenu }
+        if ($subMenu -ne [IntPtr]::Zero) {
+            $nested = Find-SubMenu $subMenu $Text
+            if ($nested -ne [IntPtr]::Zero) { return $nested }
+        }
+    }
+    [IntPtr]::Zero
+}
+
 function Get-ChildTexts([IntPtr]$Parent) {
     $result = [Collections.Generic.List[string]]::new()
     $callback = [NppQrNative+EnumWindowsProc]{
@@ -110,6 +127,17 @@ else {
     @('Path globs','Languages','Capture template','Set state','Preview')
 }
 $groupsButtonText = if ($isKoreanUi) { '그룹(G)…' } else { 'Groups' }
+$testerButtonText = if ($isKoreanUi) { '규칙 테스트' } else { 'Test rules' }
+$testerTitleText = if ($isKoreanUi) { '규칙 테스트' } else { 'Rule Tester' }
+$testerResultText = if ($isKoreanUi) { '진단 결과' } else { 'Diagnostic result' }
+$settingsCommandText = if ($isKoreanUi) { '설정…' } else { 'Settings…' }
+$settingsTitleText = if ($isKoreanUi) { '설정' } else { 'Settings' }
+$settingsRequiredControls = if ($isKoreanUi) {
+    @('인터페이스 언어','자동 재로드 간격','데이터 내보내기','데이터 가져오기')
+}
+else {
+    @('Interface language','Auto-reload interval','Export data','Import data')
+}
 
 $started = Get-Date
 $process = Start-Process -FilePath $NotepadPlusPlus -ArgumentList '-multiInst','-nosession' -PassThru
@@ -124,8 +152,12 @@ try {
     $main = [pscustomobject]@{ Handle = $process.MainWindowHandle; Title = $process.MainWindowTitle }
 
     $command = $null
+    $pluginMenu = [IntPtr]::Zero
     do {
-        $command = Find-MenuCommand ([NppQrNative]::GetMenu($main.Handle)) $managerCommandText
+        $pluginMenu = Find-SubMenu ([NppQrNative]::GetMenu($main.Handle)) 'NppQuickReplace'
+        if ($pluginMenu -ne [IntPtr]::Zero) {
+            $command = Find-MenuCommand $pluginMenu $managerCommandText
+        }
         if ($null -ne $command) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -137,6 +169,28 @@ try {
     foreach ($required in $requiredControls) {
         if (-not ($texts | Where-Object { $_.Replace('&','') -like "*$required*" })) {
             throw "Manager control '$required' was not found."
+        }
+    }
+
+    $testerButton = Find-ChildByText $manager.Handle $testerButtonText
+    if ($testerButton -eq [IntPtr]::Zero) { throw 'The Test rules button was not found.' }
+    [void][NppQrNative]::PostMessage($testerButton, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+    $tester = Wait-Window { $_.Title -like "*NppQuickReplace*$testerTitleText*" } 'the rule tester'
+    $testerTexts = Get-ChildTexts $tester.Handle
+    if (-not ($testerTexts | Where-Object { $_.Replace('&','') -like "*$testerResultText*" })) {
+        throw 'The rule tester diagnostic result control was not found.'
+    }
+    [void][NppQrNative]::PostMessage($tester.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 150
+
+    $settingsCommand = Find-MenuCommand $pluginMenu $settingsCommandText
+    if ($null -eq $settingsCommand) { throw 'The NppQuickReplace Settings command was not found.' }
+    [void][NppQrNative]::SendMessage($main.Handle, 0x0111, [IntPtr]$settingsCommand, [IntPtr]::Zero)
+    $settings = Wait-Window { $_.Title -like "*NppQuickReplace*$settingsTitleText*" } 'the settings window'
+    $settingsTexts = Get-ChildTexts $settings.Handle
+    foreach ($required in $settingsRequiredControls) {
+        if (-not ($settingsTexts | Where-Object { $_.Replace('&','') -like "*$required*" })) {
+            throw "Settings control '$required' was not found."
         }
     }
 
@@ -155,7 +209,7 @@ try {
     $crashes = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$started; Id=1000} -ErrorAction SilentlyContinue |
         Where-Object { $_.Message -like '*notepad++.exe*' }
     if ($crashes) { throw 'Windows recorded an Application Error for notepad++.exe during the smoke test.' }
-    Write-Host 'GUI smoke test passed: capture-template UI, manager controls, nested group window, responsiveness, and clean shutdown.'
+    Write-Host 'GUI smoke test passed: localized manager, rule tester, settings, nested group window, responsiveness, and clean shutdown.'
 }
 finally {
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }

@@ -3,6 +3,9 @@
 #include <cwchar>
 
 namespace nppqr::localization {
+namespace {
+LanguagePreference gPreference = LanguagePreference::automatic;
+}
 
 Language languageForLangId(LANGID languageId) noexcept {
     return PRIMARYLANGID(languageId) == LANG_KOREAN
@@ -11,6 +14,26 @@ Language languageForLangId(LANGID languageId) noexcept {
 }
 
 Language currentLanguage() noexcept {
+    if (gPreference == LanguagePreference::english) return Language::english;
+    if (gPreference == LanguagePreference::korean) return Language::korean;
+    return detectedLanguage();
+}
+
+void setLanguagePreference(std::string_view preference) noexcept {
+    if (preference == "en") {
+        gPreference = LanguagePreference::english;
+    } else if (preference == "ko") {
+        gPreference = LanguagePreference::korean;
+    } else {
+        gPreference = LanguagePreference::automatic;
+    }
+}
+
+LanguagePreference languagePreference() noexcept {
+    return gPreference;
+}
+
+Language detectedLanguage() noexcept {
     static const Language language = languageForLangId(::GetUserDefaultUILanguage());
     return language;
 }

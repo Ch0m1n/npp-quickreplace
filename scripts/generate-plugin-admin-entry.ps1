@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)]
     [string]$DllPath,
     [ValidatePattern('^\d+(\.\d+){1,3}$')]
-    [string]$Version = '0.6.0.0',
+    [string]$Version = '0.7.0.0',
     [ValidatePattern('^\[?,?(\d+(\.\d+){0,3},?){1,2}\]?$')]
     [string]$CompatibleNotepadVersions = '[8.5.3,]',
     [Parameter(Mandatory)]

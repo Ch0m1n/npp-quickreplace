@@ -145,6 +145,9 @@ $config = @"
 {
   "pluginEnabled": true,
   "rememberEnabledState": false,
+  "uiLanguage": "en",
+  "autoReloadRules": true,
+  "autoReloadIntervalMs": 250,
   "punctuationTriggers": ".,:;!?)]}",
   "processPaste": false,
   "skipReadOnlyDocuments": true,
@@ -199,6 +202,7 @@ try {
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Notepad++ did not create its main window.' }
+    if ($null -eq $manualCommand) { throw 'The manual replacement command was not found in the English override menu.' }
     $editor = Find-VisibleScintilla $process.MainWindowHandle
     if ($editor -eq [IntPtr]::Zero) { throw 'The visible Scintilla editor was not found.' }
     Focus-Editor $process.MainWindowHandle $editor
@@ -224,12 +228,39 @@ try {
     Start-Sleep -Milliseconds 80
     Assert-Equal (Get-EditorText $editor) "mm`nmm" 'Single multi-cursor Undo transaction'
 
+    $reloadedRules = @"
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "hot-reload",
+      "trigger": "hot",
+      "replacement": "RELOADED",
+      "activation": ["space"]
+    }
+  ]
+}
+"@
+    [IO.File]::WriteAllText($rulesPath, $reloadedRules, [Text.UTF8Encoding]::new($false))
+    Start-Sleep -Milliseconds 900
+    Set-EditorText $editor 'hot'
+    Set-Caret $editor 3
+    [void][NppQrFeatureNative]::SendMessage($process.MainWindowHandle, 0x0111, [IntPtr]$manualCommand, [IntPtr]::Zero)
+    Assert-Equal (Get-EditorText $editor) 'RELOADED' 'Automatic valid rule-file reload'
+
+    [IO.File]::WriteAllText($rulesPath, '{ invalid json', [Text.UTF8Encoding]::new($false))
+    Start-Sleep -Milliseconds 900
+    Set-EditorText $editor 'hot'
+    Set-Caret $editor 3
+    [void][NppQrFeatureNative]::SendMessage($process.MainWindowHandle, 0x0111, [IntPtr]$manualCommand, [IntPtr]::Zero)
+    Assert-Equal (Get-EditorText $editor) 'RELOADED' 'Invalid hot reload preserves last valid in-memory rules'
+
     $process.Refresh()
     if (-not $process.Responding) { throw 'Notepad++ stopped responding during feature tests.' }
     [void][NppQrFeatureNative]::SendMessage($editor, 2014, [IntPtr]::Zero, [IntPtr]::Zero)
     [void][NppQrFeatureNative]::PostMessage($process.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw 'Notepad++ did not exit after feature tests.' }
-    Write-Host 'Feature smoke test passed: capture templates, tabstop placement, multi-cursor replacement, and one-step Undo.'
+    Write-Host 'Feature smoke test passed: captures, tabstops, multi-cursor Undo, automatic reload, and invalid-file fallback.'
 }
 finally {
     if ($script:processHandle -and $script:processHandle -ne [IntPtr]::Zero) {

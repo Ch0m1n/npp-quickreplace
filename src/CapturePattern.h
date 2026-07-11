@@ -23,6 +23,7 @@ public:
     [[nodiscard]] CompileResult validateReplacement(std::string_view replacement) const;
     [[nodiscard]] std::optional<CaptureMatch> match(std::string_view value) const;
     [[nodiscard]] bool empty() const noexcept { return tokens_.empty(); }
+    [[nodiscard]] std::optional<unsigned char> leadingByte() const noexcept;
 
 private:
     struct Token {

@@ -1,6 +1,9 @@
 {
   "pluginEnabled": true,
   "rememberEnabledState": true,
+  "autoReloadRules": true,
+  "autoReloadIntervalMs": 1000,
+  "uiLanguage": "auto",
   "punctuationTriggers": ".,:;!?)]}",
   "processPaste": false,
   "skipReadOnlyDocuments": true,

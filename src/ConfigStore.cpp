@@ -68,6 +68,9 @@ Json mergeConfigIntoJson(const PluginConfig& config, Json root) {
     }
     root["pluginEnabled"] = config.pluginEnabled;
     root["rememberEnabledState"] = config.rememberEnabledState;
+    root["autoReloadRules"] = config.autoReloadRules;
+    root["autoReloadIntervalMs"] = config.autoReloadIntervalMs;
+    root["uiLanguage"] = config.uiLanguage;
     root["punctuationTriggers"] = config.punctuationTriggers;
     root["processPaste"] = config.processPaste;
     root["skipReadOnlyDocuments"] = config.skipReadOnlyDocuments;
@@ -289,6 +292,11 @@ ConfigLoadResult ConfigStore::loadConfig(
         parsed.skipMultiSelection = root.value(
             "skipMultiSelection", parsed.skipMultiSelection);
         parsed.maxTriggerBytes = root.value("maxTriggerBytes", parsed.maxTriggerBytes);
+        parsed.autoReloadRules = root.value("autoReloadRules", parsed.autoReloadRules);
+        parsed.autoReloadIntervalMs = root.value(
+            "autoReloadIntervalMs", parsed.autoReloadIntervalMs);
+        parsed.uiLanguage = root.value("uiLanguage", parsed.uiLanguage);
+
         parsed.maxExpandedBytes = root.value(
             "maxExpandedBytes", parsed.maxExpandedBytes);
 
@@ -311,6 +319,14 @@ ConfigLoadResult ConfigStore::loadConfig(
         }
         if (parsed.maxBackupFiles < 1 || parsed.maxBackupFiles > 100) {
             throw std::runtime_error("backup.maxFiles must be between 1 and 100.");
+        }
+        if (parsed.autoReloadIntervalMs < 250 || parsed.autoReloadIntervalMs > 10'000) {
+            throw std::runtime_error(
+                "autoReloadIntervalMs must be between 250 and 10000.");
+        }
+        if (parsed.uiLanguage != "auto" && parsed.uiLanguage != "en" &&
+            parsed.uiLanguage != "ko") {
+            throw std::runtime_error("uiLanguage must be auto, en, or ko.");
         }
         if (parsed.loggingLevel != "debug" && parsed.loggingLevel != "info" &&
             parsed.loggingLevel != "warning" && parsed.loggingLevel != "error") {

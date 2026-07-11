@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.7.0-alpha - 2026-07-11
 
-- Follow the Windows display language automatically, with Korean menus, manager controls, and common status/message localization plus English fallback for unsupported languages.
-- Extend GUI smoke coverage so localized Korean and English controls are both verified.
+- Follow the Windows display language automatically, with a persistent Auto/English/Korean override and English fallback for unsupported languages.
+- Add a DPI-aware native settings window with validated atomic saves for behavior, limits, backup, logging, reload, and language options.
+- Add automatic transactional rule-file reload that keeps the last valid in-memory rules when an external edit is invalid.
+- Add a current-draft rule tester that reports the selected rule, capture preview, competing matches, and filter blockers.
+- Add validated one-file settings-and-rules data packages with pre-import recovery copies and source-file overwrite protection.
+- Index capture-template candidates by leading byte while preserving file-order priority, reducing work for large mixed template sets.
+- Harden local installation with automatic elevation, running-host detection, SHA-256 verification, rotating installer backups, rollback, and non-destructive uninstall.
+- Add selectable x64/ARM64 build generation, architecture-correct package names, and normalize the MSBuild environment for reliable scripted builds.
+- Extend unit coverage for language preference, diagnostics, data-package round trips, overwrite protection, and capture-index priority.
 
 ## 0.6.0-alpha - 2026-07-11
 

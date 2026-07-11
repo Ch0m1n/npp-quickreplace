@@ -436,13 +436,16 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
         }
         RuleIndex exactIndex;
         RuleIndex foldedIndex;
-        std::vector<std::size_t> captureTemplateIndices;
+        std::array<std::vector<std::size_t>, 256> captureTemplateBuckets;
+        std::vector<std::size_t> captureTemplateFallback;
         exactIndex.reserve(parsedRules.size());
         foldedIndex.reserve(parsedRules.size());
         for (std::size_t index = 0; index < parsedRules.size(); ++index) {
             const ReplacementRule& rule = parsedRules[index];
             if (rule.captureTemplate) {
-                captureTemplateIndices.push_back(index);
+                const auto key = rule.compiledCaptureTemplate.leadingByte();
+                if (key.has_value()) captureTemplateBuckets[*key].push_back(index);
+                else captureTemplateFallback.push_back(index);
             } else if (rule.caseSensitive) {
                 exactIndex.emplace(rule.trigger, index);
             } else {
@@ -456,7 +459,8 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
         rules_ = std::move(parsedRules);
         exactIndex_ = std::move(exactIndex);
         foldedIndex_ = std::move(foldedIndex);
-        captureTemplateIndices_ = std::move(captureTemplateIndices);
+        captureTemplateBuckets_ = std::move(captureTemplateBuckets);
+        captureTemplateFallback_ = std::move(captureTemplateFallback);
         hasImmediateRules_ = hasImmediateRules;
         result.ok = true;
         result.loadedCount = rules_.size();
@@ -503,7 +507,23 @@ const ReplacementRule* RuleStore::findCaptureTemplate(
     std::string_view currentLanguage,
     CaptureMatch& captures,
     bool manual) const {
-    for (const std::size_t index : captureTemplateIndices_) {
+    const std::vector<std::size_t>* bucket = nullptr;
+    if (!trigger.empty()) {
+        unsigned char key = static_cast<unsigned char>(trigger.front());
+        if (key < 0x80U) key = static_cast<unsigned char>(std::tolower(key));
+        bucket = &captureTemplateBuckets_[key];
+    }
+
+    std::size_t bucketPosition = 0;
+    std::size_t fallbackPosition = 0;
+    while ((bucket != nullptr && bucketPosition < bucket->size()) ||
+           fallbackPosition < captureTemplateFallback_.size()) {
+        const bool useBucket = bucket != nullptr && bucketPosition < bucket->size() &&
+            (fallbackPosition >= captureTemplateFallback_.size() ||
+             (*bucket)[bucketPosition] < captureTemplateFallback_[fallbackPosition]);
+        const std::size_t index = useBucket
+            ? (*bucket)[bucketPosition++]
+            : captureTemplateFallback_[fallbackPosition++];
         const ReplacementRule& rule = rules_[index];
         if (!rule.enabled || !rule.groupEnabled ||
             !filtersMatch(rule, currentExtension, currentPath, currentLanguage) ||
@@ -551,6 +571,91 @@ const ReplacementRule* RuleStore::findIndexed(
     }
     return nullptr;
 }
+RuleDiagnosticResult RuleStore::diagnose(
+    std::string_view trigger,
+    Activation activation,
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage,
+    bool manual) const {
+    RuleDiagnosticResult result;
+    const std::string normalizedTrigger = normalizeUtf8(trigger);
+
+    CaptureMatch chosenCaptures;
+    const ReplacementRule* chosen = manual
+        ? findManual(normalizedTrigger, currentExtension, currentPath, currentLanguage)
+        : find(normalizedTrigger, activation, currentExtension, currentPath, currentLanguage);
+    if (chosen == nullptr) {
+        chosen = findCaptureTemplate(normalizedTrigger, activation,
+            currentExtension, currentPath, currentLanguage, chosenCaptures, manual);
+        result.captureMatch = chosen != nullptr;
+    }
+    result.matchedRule = chosen;
+    if (result.captureMatch) result.captures = chosenCaptures;
+
+    const auto addBlocker = [&](std::string value) {
+        if (std::find(result.blockers.begin(), result.blockers.end(), value) ==
+            result.blockers.end()) {
+            result.blockers.push_back(std::move(value));
+        }
+    };
+
+    for (const ReplacementRule& rule : rules_) {
+        std::optional<CaptureMatch> captures;
+        bool triggerMatches = false;
+        if (rule.captureTemplate) {
+            captures = rule.compiledCaptureTemplate.match(normalizedTrigger);
+            triggerMatches = captures.has_value();
+        } else {
+            triggerMatches = rule.caseSensitive
+                ? rule.trigger == normalizedTrigger
+                : foldAscii(rule.trigger) == foldAscii(normalizedTrigger);
+        }
+        if (!triggerMatches) continue;
+        ++result.triggerMatchCount;
+
+        const bool activationMatches = manual || contains(rule.activation, activation);
+        const bool extensionMatches = [&] {
+            if (rule.fileExtensions.empty()) return true;
+            if (currentExtension.empty()) return false;
+            return std::binary_search(rule.fileExtensions.begin(), rule.fileExtensions.end(),
+                foldAscii(currentExtension));
+        }();
+        const bool languageMatches = [&] {
+            if (rule.languages.empty()) return true;
+            if (currentLanguage.empty()) return false;
+            return std::binary_search(rule.languages.begin(), rule.languages.end(),
+                foldAscii(currentLanguage));
+        }();
+        const bool pathMatches = [&] {
+            if (rule.pathGlobs.empty()) return true;
+            if (currentPath.empty()) return false;
+            std::string normalizedPath = foldAscii(currentPath);
+            std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+            return std::any_of(rule.pathGlobs.begin(), rule.pathGlobs.end(),
+                [&](const std::string& pattern) {
+                    return globMatches(pattern, normalizedPath);
+                });
+        }();
+
+        const bool eligible = rule.enabled && rule.groupEnabled && activationMatches &&
+            extensionMatches && languageMatches && pathMatches;
+        if (eligible) {
+            ++result.eligibleMatchCount;
+            continue;
+        }
+        if (result.matchedRule != nullptr || !result.blockers.empty()) continue;
+        if (!rule.enabled) addBlocker("rule_disabled");
+        if (!rule.groupEnabled) addBlocker("group_disabled");
+        if (!activationMatches) addBlocker("activation_mismatch");
+        if (!extensionMatches) addBlocker("extension_mismatch");
+        if (!pathMatches) addBlocker("path_mismatch");
+        if (!languageMatches) addBlocker("language_mismatch");
+    }
+    if (result.triggerMatchCount == 0) addBlocker("trigger_not_found");
+    return result;
+}
+
 Activation RuleStore::activationForCharacter(
     int character,
     std::string_view punctuationCharacters) noexcept {

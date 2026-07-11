@@ -1,4 +1,5 @@
 #include "Localization.h"
+#include "DataPackage.h"
 #include "RuleStore.h"
 #include "SnippetTemplate.h"
 
@@ -212,6 +213,20 @@ void testCaptureTemplates() {
     expect(store.findCaptureTemplate(
         "ticket-18-kept", nppqr::Activation::space, "", "", "", preserved) != nullptr,
         "failed capture-template reload keeps the previous valid rule set");
+
+    const auto indexedPriority = store.loadFromText(R"json({"version":1,"items":[
+      {"id":"fallback-first","trigger":"${capture:1}-end","replacement":"fallback",
+       "matchMode":"captureTemplate","activation":["space"]},
+      {"id":"bucket-second","trigger":"a-${capture:1}","replacement":"bucket",
+       "matchMode":"captureTemplate","activation":["space"]}
+    ]})json");
+    expect(indexedPriority.ok, "capture-template index priority fixture loads");
+    nppqr::CaptureMatch indexedCaptures;
+    const auto* indexedRule = store.findCaptureTemplate(
+        "a-end", nppqr::Activation::space, "", "", "", indexedCaptures);
+    expect(indexedRule != nullptr && indexedRule->id == "fallback-first" &&
+        indexedCaptures.values[1] == "a",
+        "capture-template buckets preserve file-order priority with fallback patterns");
 }
 void testPathAndLanguageFilters() {
     nppqr::RuleStore store;
@@ -450,6 +465,103 @@ void testSnippetMarkers() {
         "unsupported tabstop numbers remain literal");
 }
 
+void testRuleDiagnostics() {
+    nppqr::RuleStore store;
+    const auto loaded = store.loadFromText(R"json({
+      "version":1,
+      "items":[
+        {"id":"literal","trigger":"ticket-123","replacement":"literal","activation":["space"]},
+        {"id":"capture","trigger":"ticket-${capture:1}","replacement":"capture ${capture:1}","matchMode":"captureTemplate","activation":["space"]},
+        {"id":"context","trigger":"ctx","replacement":"context","activation":["space"],"fileExtensions":[".md"]},
+        {"id":"disabled","enabled":false,"trigger":"off","replacement":"disabled","activation":["space"]}
+      ]
+    })json");
+    expect(loaded.ok, "diagnostic rules load");
+
+    const auto overlap = store.diagnose("ticket-123", nppqr::Activation::space);
+    expect(overlap.matchedRule != nullptr && overlap.matchedRule->id == "literal",
+        "literal rule keeps runtime priority over a capture template");
+    expect(overlap.eligibleMatchCount == 2,
+        "diagnostics count multiple eligible matches");
+
+    const auto filtered = store.diagnose("ctx", nppqr::Activation::space, ".txt");
+    expect(filtered.matchedRule == nullptr && filtered.triggerMatchCount == 1,
+        "diagnostics distinguish a trigger match from an eligible match");
+    expect(std::find(filtered.blockers.begin(), filtered.blockers.end(),
+        "extension_mismatch") != filtered.blockers.end(),
+        "diagnostics explain an extension mismatch");
+
+    const auto disabled = store.diagnose("off", nppqr::Activation::space);
+    expect(std::find(disabled.blockers.begin(), disabled.blockers.end(),
+        "rule_disabled") != disabled.blockers.end(),
+        "diagnostics explain a disabled rule");
+
+    const auto missing = store.diagnose("missing", nppqr::Activation::space);
+    expect(std::find(missing.blockers.begin(), missing.blockers.end(),
+        "trigger_not_found") != missing.blockers.end(),
+        "diagnostics explain a missing trigger");
+}
+
+void testDataPackageRoundTrip() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+        (L"NppQuickReplacePackageTests-" + std::to_wstring(::GetCurrentProcessId()) + L"-" +
+         std::to_wstring(::GetTickCount64()));
+    std::error_code fileError;
+    std::filesystem::create_directories(directory, fileError);
+    expect(!fileError, "temporary package test directory is created");
+
+    const std::filesystem::path configPath = directory / "config.json";
+    const std::filesystem::path replacementsPath = directory / "replacements.json";
+    const std::filesystem::path packagePath = directory / "package.json";
+    std::string error;
+    const std::string originalConfig =
+        R"json({"pluginEnabled":false,"uiLanguage":"ko","autoReloadRules":true,"autoReloadIntervalMs":500,"future":{"keep":7}})json";
+    const std::string originalRules =
+        R"json({"version":1,"items":[{"id":"packed","trigger":"pkg","replacement":"restored","activation":["space"]}]})json";
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(configPath, originalConfig, error),
+        "package test config is written");
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(replacementsPath, originalRules, error),
+        "package test rules are written");
+
+    const auto exported = nppqr::DataPackage::exportPackage(
+        configPath, replacementsPath, packagePath);
+    expect(exported.ok && std::filesystem::exists(packagePath),
+        "settings and rules export to one package");
+    const auto unsafeExport = nppqr::DataPackage::exportPackage(
+        configPath, replacementsPath, configPath);
+    expect(!unsafeExport.ok,
+        "data-package export refuses to overwrite config.json itself");
+    nppqr::PluginConfig configAfterRejectedExport;
+    expect(nppqr::ConfigStore::loadConfig(configPath, configAfterRejectedExport).ok &&
+        configAfterRejectedExport.uiLanguage == "ko",
+        "rejected package export preserves the source configuration");
+
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(
+        configPath, R"json({"pluginEnabled":true})json", error),
+        "config is changed before package import");
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(
+        replacementsPath, R"json({"version":1,"items":[]})json", error),
+        "rules are changed before package import");
+
+    const auto imported = nppqr::DataPackage::importPackage(
+        directory, configPath, replacementsPath, packagePath);
+    expect(imported.ok && std::filesystem::exists(imported.recoveryDirectory),
+        "validated package import creates a recovery directory");
+
+    nppqr::PluginConfig restoredConfig;
+    const auto loadedConfig = nppqr::ConfigStore::loadConfig(configPath, restoredConfig);
+    expect(loadedConfig.ok && !restoredConfig.pluginEnabled &&
+        restoredConfig.uiLanguage == "ko" && restoredConfig.autoReloadIntervalMs == 500,
+        "package import restores validated settings");
+    nppqr::RuleStore restoredRules;
+    const auto loadedRules = restoredRules.loadFromFile(replacementsPath);
+    expect(loadedRules.ok && restoredRules.find(
+        "pkg", nppqr::Activation::space, "") != nullptr,
+        "package import restores validated rules");
+
+    std::filesystem::remove_all(directory, fileError);
+}
+
 void testTenThousandRules() {
     nlohmann::json root;
     root["version"] = 1;
@@ -494,6 +606,17 @@ void testLanguageDetection() {
         : L"Replacement rules";
     expect(std::wstring(nppqr::localization::text(L"Replacement rules")) == expected,
         "runtime localization follows the current Windows UI language");
+    nppqr::localization::setLanguagePreference("ko");
+    expect(nppqr::localization::currentLanguage() == Language::korean &&
+        std::wstring(nppqr::localization::text(L"Replacement rules")) == L"치환 규칙",
+        "Korean language override takes effect immediately");
+    nppqr::localization::setLanguagePreference("en");
+    expect(nppqr::localization::currentLanguage() == Language::english &&
+        std::wstring(nppqr::localization::text(L"Replacement rules")) == L"Replacement rules",
+        "English language override takes effect immediately");
+    nppqr::localization::setLanguagePreference("auto");
+    expect(nppqr::localization::currentLanguage() == nppqr::localization::detectedLanguage(),
+        "automatic language preference restores Windows detection");
 }
 
 } // namespace
@@ -510,6 +633,8 @@ int main() {
     testDelimitedExchangeRoundTrip();
     testDelimitedImportModesAndValidation();
     testSnippetMarkers();
+    testRuleDiagnostics();
+    testDataPackageRoundTrip();
     testTenThousandRules();
 
     testLanguageDetection();

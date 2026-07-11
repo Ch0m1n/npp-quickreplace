@@ -16,12 +16,17 @@ struct PluginConfig {
     bool processPaste = false;
     bool skipReadOnlyDocuments = true;
     bool skipMultiSelection = false;
+    bool autoReloadRules = true;
+    std::size_t autoReloadIntervalMs = 1000;
+    std::string uiLanguage = "auto";
     std::size_t maxTriggerBytes = 512;
     std::size_t maxExpandedBytes = 1U * 1024U * 1024U;
     bool backupEnabled = true;
     std::size_t maxBackupFiles = 10;
     bool loggingEnabled = false;
     std::string loggingLevel = "warning";
+
+    bool operator==(const PluginConfig&) const = default;
 };
 
 struct ConfigLoadResult {
