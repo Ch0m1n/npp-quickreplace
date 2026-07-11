@@ -1,3 +1,4 @@
+#include "Localization.h"
 #include "RuleStore.h"
 #include "SnippetTemplate.h"
 
@@ -479,6 +480,22 @@ void testTenThousandRules() {
     std::cout << "100,000 indexed lookups: " << elapsed.count() << " ms\n";
 }
 
+void testLanguageDetection() {
+    using nppqr::localization::Language;
+    using nppqr::localization::languageForLangId;
+    expect(languageForLangId(MAKELANGID(LANG_KOREAN, SUBLANG_KOREAN)) == Language::korean,
+        "Korean Windows UI language selects Korean text");
+    expect(languageForLangId(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)) == Language::english,
+        "English Windows UI language selects English text");
+    expect(languageForLangId(MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN)) == Language::english,
+        "unsupported Windows UI languages fall back to English");
+    const wchar_t* expected = nppqr::localization::currentLanguage() == Language::korean
+        ? L"치환 규칙"
+        : L"Replacement rules";
+    expect(std::wstring(nppqr::localization::text(L"Replacement rules")) == expected,
+        "runtime localization follows the current Windows UI language");
+}
+
 } // namespace
 
 int main() {
@@ -495,6 +512,7 @@ int main() {
     testSnippetMarkers();
     testTenThousandRules();
 
+    testLanguageDetection();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed.\n";
         return EXIT_FAILURE;

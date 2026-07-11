@@ -99,6 +99,17 @@ function Find-ChildByText([IntPtr]$Parent, [string]$Text) {
     [void][NppQrNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     $script:matchedChild
 }
+$isKoreanUi = [Globalization.CultureInfo]::InstalledUICulture.TwoLetterISOLanguageName -eq 'ko'
+$managerCommandText = if ($isKoreanUi) { '치환 규칙 관리' } else { 'Manage replacement rules' }
+$managerTitleText = if ($isKoreanUi) { '치환 규칙 관리자' } else { 'Replacement Manager' }
+$groupManagerTitleText = if ($isKoreanUi) { '그룹 관리자' } else { 'Group Manager' }
+$requiredControls = if ($isKoreanUi) {
+    @('경로 패턴','언어','캡처 템플릿','상태 설정','미리 보기')
+}
+else {
+    @('Path globs','Languages','Capture template','Set state','Preview')
+}
+$groupsButtonText = if ($isKoreanUi) { '그룹(G)…' } else { 'Groups' }
 
 $started = Get-Date
 $process = Start-Process -FilePath $NotepadPlusPlus -ArgumentList '-multiInst','-nosession' -PassThru
@@ -114,25 +125,25 @@ try {
 
     $command = $null
     do {
-        $command = Find-MenuCommand ([NppQrNative]::GetMenu($main.Handle)) 'Manage replacement rules'
+        $command = Find-MenuCommand ([NppQrNative]::GetMenu($main.Handle)) $managerCommandText
         if ($null -ne $command) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($null -eq $command) { throw 'The NppQuickReplace manager command was not found in the Notepad++ menu.' }
     [void][NppQrNative]::SendMessage($main.Handle, 0x0111, [IntPtr]$command, [IntPtr]::Zero)
 
-    $manager = Wait-Window { $_.Title -like '*NppQuickReplace*Replacement Manager*' } 'the replacement manager'
+    $manager = Wait-Window { $_.Title -like "*NppQuickReplace*$managerTitleText*" } 'the replacement manager'
     $texts = Get-ChildTexts $manager.Handle
-    foreach ($required in @('Path globs','Languages','Capture template','Set state','Preview')) {
+    foreach ($required in $requiredControls) {
         if (-not ($texts | Where-Object { $_.Replace('&','') -like "*$required*" })) {
             throw "Manager control '$required' was not found."
         }
     }
 
-    $groupsButton = Find-ChildByText $manager.Handle 'Groups'
+    $groupsButton = Find-ChildByText $manager.Handle $groupsButtonText
     if ($groupsButton -eq [IntPtr]::Zero) { throw 'The Groups button was not found.' }
     [void][NppQrNative]::PostMessage($groupsButton, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
-    $groupManager = Wait-Window { $_.Title -like '*NppQuickReplace*Group Manager*' } 'the group manager'
+    $groupManager = Wait-Window { $_.Title -like "*NppQuickReplace*$groupManagerTitleText*" } 'the group manager'
 
     $process.Refresh()
     if (-not $process.Responding) { throw 'Notepad++ stopped responding while both managers were open.' }

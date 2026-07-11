@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "GroupManager.h"
+#include "Localization.h"
 #include "Notepad_plus_msgs.h"
 #include "RuleExchange.h"
 #include "RuleStore.h"
@@ -105,6 +106,10 @@ std::wstring windowText(HWND control) {
 
 void setText(HWND control, std::wstring_view text) {
     ::SetWindowTextW(control, std::wstring(text).c_str());
+}
+
+bool isKoreanUi() noexcept {
+    return localization::currentLanguage() == localization::Language::korean;
 }
 
 std::wstring lowerWide(std::wstring value) {
@@ -206,7 +211,7 @@ std::wstring activationSummary(const Json& item) {
     for (const auto& [key, label] : names) {
         if (!hasActivation(item, key)) continue;
         if (!result.empty()) result.append(L", ");
-        result.append(label);
+        result.append(localization::text(label.data()));
     }
     if (item.value("matchMode", "wholeWord") == "captureTemplate") {
         if (!result.empty()) result.append(L" · ");
@@ -262,7 +267,7 @@ public:
         bool maximize = false;
         loadWindowState(x, y, width, height, maximize);
         window_ = ::CreateWindowExW(
-            WS_EX_CONTROLPARENT, kWindowClass, kWindowTitle,
+            WS_EX_CONTROLPARENT, kWindowClass, localization::text(kWindowTitle),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x, y, width, height, options_.notepadHandle, nullptr, options_.module, this);
         if (window_ == nullptr) return false;
@@ -403,7 +408,8 @@ private:
         ConfigStore::writeUtf8FileAtomic(windowStatePath(), state.dump(2), error);
     }
     HWND makeControl(DWORD exStyle, const wchar_t* className, const wchar_t* text, DWORD style, int id) {
-        HWND control = ::CreateWindowExW(exStyle, className, text, WS_CHILD | WS_VISIBLE | style,
+        HWND control = ::CreateWindowExW(exStyle, className, localization::text(text),
+            WS_CHILD | WS_VISIBLE | style,
             0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), options_.module, nullptr);
         controls_.push_back(control);
         return control;
@@ -427,7 +433,7 @@ private:
         searchLabel_ = makeLabel(L"Search");
         search_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_TABSTOP | ES_AUTOHSCROLL, idSearch);
         ::SendMessageW(search_, EM_SETCUEBANNER, TRUE,
-            reinterpret_cast<LPARAM>(L"Trigger, replacement, group, or note"));
+            reinterpret_cast<LPARAM>(localization::text(L"Trigger, replacement, group, or note")));
         groupFilterLabel_ = makeLabel(L"Group");
         groupFilter_ = makeControl(0, WC_COMBOBOXW, L"",
             WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, idGroupFilter);
@@ -456,7 +462,7 @@ private:
         trigger_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idTrigger);
         ::SendMessageW(trigger_, EM_SETCUEBANNER, TRUE,
-            reinterpret_cast<LPARAM>(L"Literal trigger, or ticket-${capture:1}"));
+            reinterpret_cast<LPARAM>(localization::text(L"Literal trigger, or ticket-${capture:1}")));
         groupLabel_ = makeLabel(L"Group ID");
         group_ = makeControl(WS_EX_CLIENTEDGE, WC_COMBOBOXW, L"",
             WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL, idGroup);
@@ -472,17 +478,17 @@ private:
         extensions_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idExtensions);
         ::SendMessageW(extensions_, EM_SETCUEBANNER, TRUE,
-            reinterpret_cast<LPARAM>(L"All files, or .txt, .md, .xml"));
+            reinterpret_cast<LPARAM>(localization::text(L"All files, or .txt, .md, .xml")));
         pathGlobsLabel_ = makeLabel(L"Path globs");
         pathGlobs_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idPathGlobs);
         ::SendMessageW(pathGlobs_, EM_SETCUEBANNER, TRUE,
-            reinterpret_cast<LPARAM>(L"Example: */docs/*, C:/work/*.md"));
+            reinterpret_cast<LPARAM>(localization::text(L"Example: */docs/*, C:/work/*.md")));
         languagesLabel_ = makeLabel(L"Languages");
         languages_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idLanguages);
         ::SendMessageW(languages_, EM_SETCUEBANNER, TRUE,
-            reinterpret_cast<LPARAM>(L"Example: Python, Markdown"));        replacementLabel_ = makeLabel(L"Replacement text");
+            reinterpret_cast<LPARAM>(localization::text(L"Example: Python, Markdown")));        replacementLabel_ = makeLabel(L"Replacement text");
         replacement_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
             idReplacement);
@@ -520,7 +526,7 @@ private:
     void addListColumn(int index, const wchar_t* text, int width) {
         LVCOLUMNW column{};
         column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        column.pszText = const_cast<wchar_t*>(text);
+        column.pszText = const_cast<wchar_t*>(localization::text(text));
         column.cx = width;
         column.iSubItem = index;
         ListView_InsertColumn(list_, index, &column);
@@ -671,7 +677,7 @@ private:
                 loadedFileStamp_ = {};
             }
             externalChangeDetected_ = false;
-            setText(subtitle_, L"Search, edit, validate, and save without touching raw JSON.");
+            setText(subtitle_, localization::text(L"Search, edit, validate, and save without touching raw JSON."));
             dirty_ = false;
             detailsDirty_ = false;
             selectedDocumentIndex_.reset();
@@ -682,7 +688,9 @@ private:
             updateWindowTitle();
             setDetailStatus(validation.warnings.empty()
                 ? L"Loaded and validated."
-                : L"Loaded with " + std::to_wstring(validation.warnings.size()) + L" warning(s).");
+                : (isKoreanUi()
+                    ? L"경고 " + std::to_wstring(validation.warnings.size()) + L"개와 함께 불러왔어요."
+                    : L"Loaded with " + std::to_wstring(validation.warnings.size()) + L" warning(s)."));
             return true;
         } catch (const std::exception& exception) {
             if (showError) {
@@ -699,7 +707,7 @@ private:
         ::SendMessageW(groupFilter_, CB_RESETCONTENT, 0, 0);
         filterGroups_.clear();
         filterGroups_.push_back({});
-        ::SendMessageW(groupFilter_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All groups"));
+        ::SendMessageW(groupFilter_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::text(L"All groups")));
         const auto groups = document_.find("groups");
         if (groups != document_.end() && groups->is_array()) {
             for (const auto& group : *groups) {
@@ -768,10 +776,10 @@ private:
             CachedRuleRow row;
             row.documentIndex = index;
             const auto groupState = groupStates.find(group);
-            if (!item.value("enabled", true)) row.columns[0] = L"Rule off";
-            else if (!group.empty() && groupState == groupStates.end()) row.columns[0] = L"Missing group";
-            else if (groupState != groupStates.end() && !groupState->second) row.columns[0] = L"Group off";
-            else row.columns[0] = L"On";
+            if (!item.value("enabled", true)) row.columns[0] = localization::text(L"Rule off");
+            else if (!group.empty() && groupState == groupStates.end()) row.columns[0] = localization::text(L"Missing group");
+            else if (groupState != groupStates.end() && !groupState->second) row.columns[0] = localization::text(L"Group off");
+            else row.columns[0] = localization::text(L"On");
             row.columns[1] = utf8ToWide(item.value("trigger", ""));
             const std::wstring fullReplacement = utf8ToWide(item.value("replacement", ""));
             row.columns[2] = oneLine(fullReplacement);
@@ -789,8 +797,11 @@ private:
         ListView_SetItemCountEx(list_, static_cast<int>(visibleRows_.size()),
             LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
         ::InvalidateRect(list_, nullptr, FALSE);
-        setText(listStatus_, std::to_wstring(visibleRows_.size()) + L" of " +
-            std::to_wstring(items.size()) + L" rules shown");
+        setText(listStatus_, isKoreanUi()
+            ? L"전체 " + std::to_wstring(items.size()) + L"개 중 " +
+                std::to_wstring(visibleRows_.size()) + L"개 규칙 표시"
+            : std::to_wstring(visibleRows_.size()) + L" of " +
+                std::to_wstring(items.size()) + L" rules shown");
         loading_ = false;
         if (selectedDocumentIndex_.has_value()) selectDocumentIndex(*selectedDocumentIndex_);
     }
@@ -953,11 +964,15 @@ private:
             populateGroupFilter();
             populateGroupEditor();
             setText(group_, utf8ToWide(groupId));
-            setDetailStatus(L"Applied to draft and created group '" + utf8ToWide(groupId) + L"'.");
+            setDetailStatus(isKoreanUi()
+                ? L"초안에 적용하고 그룹 '" + utf8ToWide(groupId) + L"'을(를) 만들었어요."
+                : L"Applied to draft and created group '" + utf8ToWide(groupId) + L"'.");
         } else {
             setDetailStatus(validation.warnings.empty()
                 ? L"Applied to draft. Save changes to write the file."
-                : L"Applied with " + std::to_wstring(validation.warnings.size()) + L" warning(s).");
+                : (isKoreanUi()
+                    ? L"경고 " + std::to_wstring(validation.warnings.size()) + L"개와 함께 초안에 적용했어요."
+                    : L"Applied with " + std::to_wstring(validation.warnings.size()) + L" warning(s)."));
         }
         if (refresh) {
             refreshList();
@@ -990,11 +1005,16 @@ private:
         if (writeResult == AtomicWriteResult::conflict) {
             externalChangeDetected_ = true;
             const int choice = ::MessageBoxW(window_,
-                L"replacements.json changed outside this manager.\n\n"
-                L"Yes: reload the newer file and discard this draft\n"
-                L"No: save this draft as a separate JSON file\n"
-                L"Cancel: keep editing without saving",
-                kWindowTitle, MB_YESNOCANCEL | MB_ICONWARNING);
+                localization::text(
+                    L"replacements.json changed outside this manager.\n\n"
+                    L"Yes: reload the newer file and discard this draft\n"
+                    L"No: save this draft as a separate JSON file\n"
+                    L"Cancel: keep editing without saving",
+                    L"이 관리자 창 밖에서 replacements.json이 변경됐어요.\n\n"
+                    L"예: 새 파일을 다시 불러오고 현재 초안 버리기\n"
+                    L"아니요: 현재 초안을 별도 JSON 파일로 저장하기\n"
+                    L"취소: 저장하지 않고 계속 편집하기"),
+                localization::text(kWindowTitle), MB_YESNOCANCEL | MB_ICONWARNING);
             if (choice == IDYES) return loadDocument(true);
             if (choice == IDNO) return saveDraftCopy(serialized);
             setDetailStatus(L"Save cancelled · the external file was not overwritten.");
@@ -1010,15 +1030,20 @@ private:
             loadedFileStamp_ = {};
         }
         externalChangeDetected_ = false;
-        setText(subtitle_, L"Search, edit, validate, and save without touching raw JSON.");
+        setText(subtitle_, localization::text(L"Search, edit, validate, and save without touching raw JSON."));
         dirty_ = false;
         detailsDirty_ = false;
         updateWindowTitle();
         if (options_.onRulesSaved) options_.onRulesSaved();
-        std::wstring status = L"Saved " + std::to_wstring(validation.loadedCount) + L" rules";
-        if (!backup.empty()) status += L" · backup created";
+        std::wstring status = isKoreanUi()
+            ? L"규칙 " + std::to_wstring(validation.loadedCount) + L"개 저장"
+            : L"Saved " + std::to_wstring(validation.loadedCount) + L" rules";
+        if (!backup.empty()) {
+            status += localization::text(L" · backup created", L" · 백업 생성");
+        }
         if (!validation.warnings.empty()) {
-            status += L" · " + std::to_wstring(validation.warnings.size()) + L" warning(s)";
+            status += L" · " + std::to_wstring(validation.warnings.size()) +
+                localization::text(L" warning(s)", L"개 경고");
         }
         setDetailStatus(status + L".");
         refreshList();
@@ -1033,7 +1058,8 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter = L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0\0";
+        dialog.lpstrFilter = localization::text(
+            L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0\0", L"JSON 파일 (*.json)\0*.json\0모든 파일 (*.*)\0*.*\0\0");
         dialog.lpstrFile = path;
         dialog.nMaxFile = static_cast<DWORD>(std::size(path));
         dialog.lpstrDefExt = L"json";
@@ -1060,7 +1086,7 @@ private:
         if (ConfigStore::contentHash(content) == loadedContentHash_) return;
         if (!externalChangeDetected_) {
             externalChangeDetected_ = true;
-            setText(subtitle_, L"Warning: replacements.json changed outside this window.");
+            setText(subtitle_, localization::text(L"Warning: replacements.json changed outside this window."));
             setDetailStatus(
                 L"Warning · replacements.json changed outside this window. Reload or save a draft copy.");
         }
@@ -1126,9 +1152,11 @@ private:
         }
         if (indices.empty()) return;
         const std::wstring prompt = indices.size() == 1
-            ? L"Delete the selected rule from the draft?"
-            : L"Delete " + std::to_wstring(indices.size()) + L" selected rules from the draft?";
-        if (::MessageBoxW(window_, prompt.c_str(), kWindowTitle,
+            ? localization::text(L"Delete the selected rule from the draft?")
+            : (isKoreanUi()
+                ? L"선택한 규칙 " + std::to_wstring(indices.size()) + L"개를 초안에서 삭제할까요?"
+                : L"Delete " + std::to_wstring(indices.size()) + L" selected rules from the draft?");
+        if (::MessageBoxW(window_, prompt.c_str(), localization::text(kWindowTitle),
                 MB_YESNO | MB_ICONWARNING) != IDYES) return;
         std::sort(indices.begin(), indices.end(), std::greater<>());
         for (const std::size_t index : indices) {
@@ -1155,17 +1183,21 @@ private:
             return;
         }
         const int choice = ::MessageBoxW(window_,
-            L"Change the selected rules?\n\nYes: enable\nNo: disable\nCancel: leave unchanged",
-            kWindowTitle, MB_YESNOCANCEL | MB_ICONQUESTION);
+            localization::text(L"Change the selected rules?\n\nYes: enable\nNo: disable\nCancel: leave unchanged"),
+            localization::text(kWindowTitle), MB_YESNOCANCEL | MB_ICONQUESTION);
         if (choice == IDCANCEL) return;
         const bool enabled = choice == IDYES;
         for (const std::size_t index : indices) document_["items"][index]["enabled"] = enabled;
         dirty_ = true;
         updateWindowTitle();
         refreshList();
-        setDetailStatus(std::to_wstring(indices.size()) +
-            (enabled ? L" selected rule(s) enabled in the draft." :
-                       L" selected rule(s) disabled in the draft."));
+        setDetailStatus(isKoreanUi()
+            ? L"선택한 규칙 " + std::to_wstring(indices.size()) +
+                (enabled ? L"개를 초안에서 사용하도록 설정했어요." :
+                           L"개를 초안에서 사용하지 않도록 설정했어요.")
+            : std::to_wstring(indices.size()) +
+                (enabled ? L" selected rule(s) enabled in the draft." :
+                           L" selected rule(s) disabled in the draft."));
     }
 
     void previewCurrentRule() {
@@ -1200,8 +1232,9 @@ private:
             preview.push_back(L'…');
         }
         ::MessageBoxW(window_,
-            (L"Preview (dynamic values are shown in brackets)\n\n" + preview).c_str(),
-            L"NppQuickReplace · Rule Preview", MB_OK | MB_ICONINFORMATION);
+            (std::wstring(localization::text(L"Preview (dynamic values are shown in brackets)")) +
+                L"\n\n" + preview).c_str(),
+            localization::text(L"NppQuickReplace · Rule Preview"), MB_OK | MB_ICONINFORMATION);
     }
     void clearFilters() {
         loading_ = true;
@@ -1212,7 +1245,7 @@ private:
 
     void reloadFromDisk() {
         if ((dirty_ || detailsDirty_) && ::MessageBoxW(window_,
-                L"Discard the current draft and reload replacements.json?", kWindowTitle,
+                localization::text(L"Discard the current draft and reload replacements.json?"), localization::text(kWindowTitle),
                 MB_YESNO | MB_ICONWARNING) != IDYES) return;
         loadDocument(true);
     }
@@ -1251,8 +1284,9 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter =
-            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0";
+        dialog.lpstrFilter = localization::text(
+            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0All files (*.*)\0*.*\0\0",
+            L"CSV 규칙 파일 (*.csv)\0*.csv\0TSV 규칙 파일 (*.tsv)\0*.tsv\0모든 파일 (*.*)\0*.*\0\0");
         dialog.lpstrFile = path;
         dialog.nMaxFile = static_cast<DWORD>(std::size(path));
         dialog.lpstrInitialDir = options_.dataDirectory.c_str();
@@ -1273,11 +1307,16 @@ private:
         }
         const int choice = ::MessageBoxW(
             window_,
-            L"How should these rules be imported?\n\n"
-            L"Yes  — append to the current draft\n"
-            L"No   — replace every rule in the current draft\n"
-            L"Cancel — leave the draft unchanged",
-            kWindowTitle,
+            localization::text(
+                L"How should these rules be imported?\n\n"
+                L"Yes  — append to the current draft\n"
+                L"No   — replace every rule in the current draft\n"
+                L"Cancel — leave the draft unchanged",
+                L"이 규칙을 어떻게 가져올까요?\n\n"
+                L"예  — 현재 초안에 추가\n"
+                L"아니요 — 현재 초안의 모든 규칙 교체\n"
+                L"취소 — 초안을 변경하지 않음"),
+            localization::text(kWindowTitle),
             MB_YESNOCANCEL | MB_ICONQUESTION);
         if (choice == IDCANCEL) return;
         const DelimitedImportMode mode =
@@ -1310,13 +1349,21 @@ private:
         setDetailsEnabled(false);
         updateWindowTitle();
 
-        std::wstring status =
-            (mode == DelimitedImportMode::append ? L"Appended " : L"Replaced the draft with ") +
-            std::to_wstring(imported.itemCount) + L" imported rule(s)";
-        if (!imported.warnings.empty()) {
-            status += L" · " + std::to_wstring(imported.warnings.size()) + L" warning(s)";
+        std::wstring status;
+        if (isKoreanUi()) {
+            status = mode == DelimitedImportMode::append
+                ? L"가져온 규칙 " + std::to_wstring(imported.itemCount) + L"개를 초안에 추가"
+                : L"초안을 가져온 규칙 " + std::to_wstring(imported.itemCount) + L"개로 교체";
+        } else {
+            status = (mode == DelimitedImportMode::append ? L"Appended " : L"Replaced the draft with ") +
+                std::to_wstring(imported.itemCount) + L" imported rule(s)";
         }
-        setDetailStatus(status + L". Save changes to write the file.");
+        if (!imported.warnings.empty()) {
+            status += L" · " + std::to_wstring(imported.warnings.size()) +
+                localization::text(L" warning(s)", L"개 경고");
+        }
+        setDetailStatus(status + localization::text(
+            L". Save changes to write the file.", L". 파일에 쓰려면 변경 내용을 저장하세요."));
     }
 
     void exportRules() {
@@ -1326,8 +1373,9 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter =
-            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0\0";
+        dialog.lpstrFilter = localization::text(
+            L"CSV rule files (*.csv)\0*.csv\0TSV rule files (*.tsv)\0*.tsv\0\0",
+            L"CSV 규칙 파일 (*.csv)\0*.csv\0TSV 규칙 파일 (*.tsv)\0*.tsv\0\0");
         dialog.lpstrFile = path;
         dialog.nMaxFile = static_cast<DWORD>(std::size(path));
         dialog.lpstrInitialDir = options_.dataDirectory.c_str();
@@ -1357,11 +1405,16 @@ private:
         }
         if (!exported.warnings.empty()) {
             const int choice = ::MessageBoxW(window_,
-                L"Some cells begin with =, +, -, or @ and may run as formulas in spreadsheet software.\n\n"
-                L"Yes: prefix risky cells with an apostrophe (safer for spreadsheets)\n"
-                L"No: keep the exact original text (lossless)\n"
-                L"Cancel: do not export",
-                kWindowTitle, MB_YESNOCANCEL | MB_ICONWARNING);
+                localization::text(
+                    L"Some cells begin with =, +, -, or @ and may run as formulas in spreadsheet software.\n\n"
+                    L"Yes: prefix risky cells with an apostrophe (safer for spreadsheets)\n"
+                    L"No: keep the exact original text (lossless)\n"
+                    L"Cancel: do not export",
+                    L"일부 셀이 =, +, -, @ 문자로 시작해 스프레드시트에서 수식으로 실행될 수 있어요.\n\n"
+                    L"예: 위험한 셀 앞에 작은따옴표 추가 (스프레드시트에서 더 안전함)\n"
+                    L"아니요: 원본 텍스트를 그대로 유지 (무손실)\n"
+                    L"취소: 내보내지 않음"),
+                localization::text(kWindowTitle), MB_YESNOCANCEL | MB_ICONWARNING);
             if (choice == IDCANCEL) return;
             if (choice == IDYES) {
                 exported = RuleExchange::exportDelimited(document_.dump(), delimiter, true);
@@ -1379,9 +1432,11 @@ private:
                 utf8ToWide(error), MB_ICONERROR);
             return;
         }
-        setDetailStatus(
-            L"Exported " + std::to_wstring(exported.itemCount) + L" rule(s) to " +
-            selectedPath.filename().wstring() + L".");
+        setDetailStatus(isKoreanUi()
+            ? L"규칙 " + std::to_wstring(exported.itemCount) + L"개를 " +
+                selectedPath.filename().wstring() + L"(으)로 내보냈어요."
+            : L"Exported " + std::to_wstring(exported.itemCount) + L" rule(s) to " +
+                selectedPath.filename().wstring() + L".");
     }
 
     void restoreBackup() {
@@ -1390,7 +1445,8 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter = L"Replacement backups (*.json)\0*.json\0All files (*.*)\0*.*\0\0";
+        dialog.lpstrFilter = localization::text(
+            L"Replacement backups (*.json)\0*.json\0All files (*.*)\0*.*\0\0", L"치환 백업 (*.json)\0*.json\0모든 파일 (*.*)\0*.*\0\0");
         dialog.lpstrFile = path;
         dialog.nMaxFile = static_cast<DWORD>(std::size(path));
         dialog.lpstrInitialDir = backupDirectory.c_str();
@@ -1409,10 +1465,12 @@ private:
             showMessage(L"That backup is not valid.\n\n" + utf8ToWide(validation.error), MB_ICONERROR);
             return;
         }
-        const std::wstring prompt = L"Restore this backup with " +
-            std::to_wstring(validation.loadedCount) +
-            L" rules?\n\nThe current file will be backed up first.";
-        if (::MessageBoxW(window_, prompt.c_str(), kWindowTitle,
+        const std::wstring prompt = isKoreanUi()
+            ? L"규칙 " + std::to_wstring(validation.loadedCount) +
+                L"개가 들어 있는 이 백업을 복원할까요?\n\n현재 파일을 먼저 백업해요."
+            : L"Restore this backup with " + std::to_wstring(validation.loadedCount) +
+                L" rules?\n\nThe current file will be backed up first.";
+        if (::MessageBoxW(window_, prompt.c_str(), localization::text(kWindowTitle),
                 MB_YESNO | MB_ICONQUESTION) != IDYES) return;
 
         std::filesystem::path currentBackup;
@@ -1435,7 +1493,7 @@ private:
     bool confirmClose() {
         if (!dirty_ && !detailsDirty_) return true;
         const int answer = ::MessageBoxW(window_,
-            L"Save the current rule changes before closing?", kWindowTitle,
+            localization::text(L"Save the current rule changes before closing?"), localization::text(kWindowTitle),
             MB_YESNOCANCEL | MB_ICONQUESTION);
         if (answer == IDCANCEL) return false;
         return answer != IDYES || saveDocument();
@@ -1446,7 +1504,7 @@ private:
         if (id == idSearch && notification == EN_CHANGE) {
             ::KillTimer(window_, kSearchTimer);
             ::SetTimer(window_, kSearchTimer, kSearchDebounceMs, nullptr);
-            setText(listStatus_, L"Filtering…");
+            setText(listStatus_, localization::text(L"Filtering…"));
             return;
         }
         if (id == idGroupFilter && notification == CBN_SELCHANGE) {
@@ -1551,15 +1609,17 @@ private:
     }
 
     void showMessage(std::wstring_view message, UINT icon) const {
-        ::MessageBoxW(window_, std::wstring(message).c_str(), kWindowTitle, MB_OK | icon);
+        const std::wstring value(message);
+        ::MessageBoxW(window_, localization::text(value.c_str()), localization::text(kWindowTitle), MB_OK | icon);
     }
 
     void setDetailStatus(std::wstring_view text) {
-        setText(detailStatus_, text);
+        const std::wstring value(text);
+        ::SetWindowTextW(detailStatus_, localization::text(value.c_str()));
     }
 
     void updateWindowTitle() const {
-        const std::wstring title = std::wstring(kWindowTitle) +
+        const std::wstring title = std::wstring(localization::text(kWindowTitle)) +
             (dirty_ || detailsDirty_ ? L" *" : L"");
         ::SetWindowTextW(window_, title.c_str());
     }
@@ -1649,7 +1709,7 @@ void showRuleManager(const RuleManagerOptions& options) {
         delete manager;
         ::MessageBoxW(options.notepadHandle,
             L"The replacement manager window could not be created.",
-            kWindowTitle, MB_OK | MB_ICONERROR);
+            localization::text(kWindowTitle), MB_OK | MB_ICONERROR);
     }
 }
 

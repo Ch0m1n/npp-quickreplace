@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "Notepad_plus_msgs.h"
+#include "Localization.h"
 #include "RuleStore.h"
 
 namespace nppqr {
@@ -114,7 +115,7 @@ public:
         window_ = ::CreateWindowExW(
             WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME,
             kGroupWindowClass,
-            kGroupWindowTitle,
+            localization::text(kGroupWindowTitle),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
             x,
             y,
@@ -201,7 +202,7 @@ private:
         HWND control = ::CreateWindowExW(
             exStyle,
             className,
-            text,
+            localization::text(text),
             WS_CHILD | WS_VISIBLE | style,
             0,
             0,
@@ -252,12 +253,12 @@ private:
         id_ = makeControl(
             WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_TABSTOP | ES_AUTOHSCROLL, idGroupId);
         ::SendMessageW(
-            id_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Example: templates"));
+            id_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(localization::text(L"Example: templates")));
         nameLabel_ = makeLabel(L"Display name");
         name_ = makeControl(
             WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_TABSTOP | ES_AUTOHSCROLL, idGroupName);
         ::SendMessageW(
-            name_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Example: Work templates"));
+            name_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(localization::text(L"Example: Work templates")));
         hint_ = makeLabel(
             L"Changing an ID updates every rule that uses it. Deleting a group leaves those rules ungrouped.");
         status_ = makeLabel(L"Select a group, or create a new one.");
@@ -281,7 +282,7 @@ private:
     void addColumn(int index, const wchar_t* text, int width) {
         LVCOLUMNW column{};
         column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        column.pszText = const_cast<wchar_t*>(text);
+        column.pszText = const_cast<wchar_t*>(localization::text(text));
         column.cx = width;
         column.iSubItem = index;
         ListView_InsertColumn(list_, index, &column);
@@ -386,7 +387,7 @@ private:
             const Json& group = document_["groups"][index];
             if (!group.is_object()) continue;
             const std::string id = group.value("id", "");
-            const std::wstring state = group.value("enabled", true) ? L"On" : L"Off";
+            const std::wstring state = localization::text(group.value("enabled", true) ? L"On" : L"Off");
             const std::wstring wideId = utf8ToWide(id);
             const std::wstring name = utf8ToWide(group.value("name", id));
             const std::wstring rules = std::to_wstring(ruleCounts[id]);
@@ -527,7 +528,8 @@ private:
         if (!validation.ok) {
             document_ = std::move(previous);
             showMessage(
-                L"This group change is not valid.\n\n" + utf8ToWide(validation.error),
+                std::wstring(localization::text(L"This group change is not valid.\n\n",
+                    L"이 그룹 변경 내용은 올바르지 않아요.\n\n")) + utf8ToWide(validation.error),
                 MB_ICONWARNING);
             return;
         }
@@ -547,13 +549,14 @@ private:
         const Json& group = document_["groups"][*currentIndex_];
         const std::string id = group.value("id", "");
         const std::size_t usedBy = ruleCount(id);
-        std::wstring prompt = L"Delete group '" + utf8ToWide(id) + L"' from the draft?";
+        std::wstring prompt = std::wstring(localization::text(L"Delete group '", L"그룹 '")) +
+            utf8ToWide(id) + localization::text(L"' from the draft?", L"'을(를) 초안에서 삭제할까요?");
         if (usedBy != 0) {
-            prompt += L"\n\n" + std::to_wstring(usedBy) +
-                L" linked rule(s) will remain, but become ungrouped.";
+            prompt += L"\n\n" + std::to_wstring(usedBy) + localization::text(
+                L" linked rule(s) will remain, but become ungrouped.", L"개의 연결된 규칙은 남지만 그룹 없음 상태가 돼요.");
         }
         if (::MessageBoxW(
-                window_, prompt.c_str(), kGroupWindowTitle, MB_YESNO | MB_ICONWARNING) != IDYES) {
+                window_, prompt.c_str(), localization::text(kGroupWindowTitle), MB_YESNO | MB_ICONWARNING) != IDYES) {
             return;
         }
 
@@ -572,7 +575,8 @@ private:
         if (!validation.ok) {
             document_ = std::move(previous);
             showMessage(
-                L"The group could not be deleted.\n\n" + utf8ToWide(validation.error),
+                std::wstring(localization::text(L"The group could not be deleted.\n\n",
+                    L"그룹을 삭제할 수 없어요.\n\n")) + utf8ToWide(validation.error),
                 MB_ICONERROR);
             return;
         }
@@ -587,8 +591,8 @@ private:
         if (!editorDirty_) return true;
         return ::MessageBoxW(
                    window_,
-                   L"Discard the unapplied group detail changes?",
-                   kGroupWindowTitle,
+                   localization::text(L"Discard the unapplied group detail changes?"),
+                   localization::text(kGroupWindowTitle),
                    MB_YESNO | MB_ICONQUESTION) == IDYES;
     }
 
@@ -640,12 +644,14 @@ private:
     }
 
     void showMessage(std::wstring_view message, UINT icon) const {
-        ::MessageBoxW(
-            window_, std::wstring(message).c_str(), kGroupWindowTitle, MB_OK | icon);
+        const std::wstring value(message);
+        ::MessageBoxW(window_, localization::text(value.c_str()),
+            localization::text(kGroupWindowTitle), MB_OK | icon);
     }
 
     void setStatus(std::wstring_view text) {
-        ::SetWindowTextW(status_, std::wstring(text).c_str());
+        const std::wstring value(text);
+        ::SetWindowTextW(status_, localization::text(value.c_str()));
     }
 
     HWND owner_ = nullptr;

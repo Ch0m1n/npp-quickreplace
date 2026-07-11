@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "ConfigStore.h"
+#include "Localization.h"
 #include "RuleManager.h"
 #include "RuleStore.h"
 #include "SnippetTemplate.h"
@@ -68,6 +69,10 @@ std::wstring gPunctuationCharacters;
 bool gReady = false;
 bool gInternalEdit = false;
 bool gConfigValid = false;
+
+const wchar_t* tr(const wchar_t* english, const wchar_t* korean) noexcept {
+    return nppqr::localization::text(english, korean);
+}
 
 std::wstring utf8ToWide(std::string_view text) {
     if (text.empty()) return {};
@@ -120,7 +125,8 @@ std::wstring warningSummary(const std::vector<std::string>& warnings) {
         result += L"\n• " + utf8ToWide(warnings[index]);
     }
     if (warnings.size() > shown) {
-        result += L"\n• …and " + std::to_wstring(warnings.size() - shown) + L" more";
+        result += tr(L"\n• …and ", L"\n• …외 ") +
+            std::to_wstring(warnings.size() - shown) + tr(L" more", L"개");
     }
     return result;
 }
@@ -856,9 +862,10 @@ bool loadRules(bool showResult) {
     const nppqr::RuleLoadResult primary = gRules.loadFromFile(gReplacementsPath);
     if (primary.ok) {
         if (showResult) {
-            std::wstring message = L"Loaded " + std::to_wstring(primary.loadedCount) + L" replacement rules.";
+            std::wstring message = tr(L"Loaded ", L"치환 규칙 ") +
+                std::to_wstring(primary.loadedCount) + tr(L" replacement rules.", L"개를 불러왔어요.");
             if (!primary.warnings.empty()) {
-                message += L"\n\nWarnings:" + warningSummary(primary.warnings);
+                message += tr(L"\n\nWarnings:", L"\n\n경고:") + warningSummary(primary.warnings);
             }
             showMessage(message, primary.warnings.empty() ? MB_ICONINFORMATION : MB_ICONWARNING);
         }
@@ -871,14 +878,17 @@ bool loadRules(bool showResult) {
     for (const auto& backup : ConfigStore::replacementBackupsNewestFirst(gDataDirectory)) {
         const nppqr::RuleLoadResult recovered = gRules.loadFromFile(backup);
         if (recovered.ok) {
-            showMessage(L"replacements.json could not be loaded.\n\n"
-                L"The newest valid backup was loaded in memory instead. The original file was not overwritten.\n\n" +
+            showMessage(std::wstring(tr(
+                L"replacements.json could not be loaded.\n\nThe newest valid backup was loaded in memory instead. The original file was not overwritten.\n\n",
+                L"replacements.json을 불러올 수 없어요.\n\n대신 가장 최근의 유효한 백업을 메모리에 불러왔어요. 원본 파일은 덮어쓰지 않았어요.\n\n")) +
                 utf8ToWide(primary.error), MB_ICONWARNING);
             logMessage(L"error", L"Loaded rules from backup after replacements.json failed validation.");
             return true;
         }
     }
-    showMessage(L"No replacement rules were loaded. The existing file was left unchanged.\n\n" +
+    showMessage(std::wstring(tr(
+        L"No replacement rules were loaded. The existing file was left unchanged.\n\n",
+        L"치환 규칙을 불러오지 못했어요. 기존 파일은 변경하지 않았어요.\n\n")) +
         utf8ToWide(primary.error), MB_ICONERROR);
     return false;
 }
@@ -890,14 +900,17 @@ bool loadConfiguration(bool showWarnings) {
     if (!result.ok) {
         gConfig = PluginConfig{};
         updatePunctuationCache();
-        showMessage(L"config.json is invalid. Safe in-memory defaults are active, and the existing file was not overwritten.\n\n" +
+        showMessage(std::wstring(tr(
+            L"config.json is invalid. Safe in-memory defaults are active, and the existing file was not overwritten.\n\n",
+            L"config.json이 올바르지 않아요. 안전한 기본 설정을 메모리에서 사용하며 기존 파일은 덮어쓰지 않았어요.\n\n")) +
             utf8ToWide(result.error), MB_ICONWARNING);
         return false;
     }
     gConfig = std::move(loaded);
     updatePunctuationCache();
     if (showWarnings && !result.warnings.empty()) {
-        showMessage(L"Configuration loaded with warnings:" + warningSummary(result.warnings), MB_ICONWARNING);
+        showMessage(std::wstring(tr(L"Configuration loaded with warnings:",
+            L"설정을 경고와 함께 불러왔어요:")) + warningSummary(result.warnings), MB_ICONWARNING);
     }
     return true;
 }
@@ -907,7 +920,8 @@ bool initializePlugin() {
     const LRESULT length = ::SendMessageW(gNppData._nppHandle, NPPM_GETPLUGINSCONFIGDIR,
         static_cast<WPARAM>(configDirectory.size()), reinterpret_cast<LPARAM>(configDirectory.data()));
     if (length <= 0 || configDirectory.front() == L'\0') {
-        showMessage(L"Notepad++ did not provide a plugin configuration directory.", MB_ICONERROR);
+        showMessage(tr(L"Notepad++ did not provide a plugin configuration directory.",
+            L"Notepad++에서 플러그인 설정 폴더를 제공하지 않았어요."), MB_ICONERROR);
         return false;
     }
     gDataDirectory = std::filesystem::path(configDirectory.data()) / kPluginName;
@@ -1073,11 +1087,13 @@ void openDataFolder() {
 }
 
 void showAbout() {
-    showMessage(std::wstring(kPluginName) + L" " + kPluginVersion +
-        L"\n\nFast, local text expansion for Notepad++.\n"
-        L"Loaded rules: " + std::to_wstring(gRules.size()) +
-        L"\n\nIncludes a searchable rule manager, immediate replacement, validation, and rotating backups."
-        L"\nNo document content is sent over the network.");
+    const std::wstring message = std::wstring(kPluginName) + L" " + kPluginVersion +
+        tr(L"\n\nFast, local text expansion for Notepad++.\nLoaded rules: ",
+           L"\n\nNotepad++용 빠른 로컬 텍스트 확장 플러그인이에요.\n불러온 규칙: ") +
+        std::to_wstring(gRules.size()) +
+        tr(L"\n\nIncludes a searchable rule manager, immediate replacement, validation, and rotating backups.\nNo document content is sent over the network.",
+           L"\n\n검색 가능한 규칙 관리자, 즉시 치환, 유효성 검사, 순환 백업 기능을 포함해요.\n문서 내용은 네트워크로 전송하지 않아요.");
+    showMessage(message);
 }
 
 bool setCommand(int index, const wchar_t* name, PFUNCPLUGINCMD function,
@@ -1091,13 +1107,20 @@ bool setCommand(int index, const wchar_t* name, PFUNCPLUGINCMD function,
 }
 
 void initializeCommands() {
-    setCommand(commandToggleEnabled, L"Automatic replacement enabled", toggleEnabled, nullptr, true);
-    setCommand(commandPauseCurrentDocument, L"Pause for current document", togglePauseCurrentDocument);
-    setCommand(commandManualReplace, L"Replace trigger before caret", manualReplace, &gManualShortcut);
-    setCommand(commandReload, L"Reload settings and rules", reloadAll);
-    setCommand(commandManageReplacements, L"Manage replacement rules…", manageReplacements);
-    setCommand(commandOpenDataFolder, L"Open data folder", openDataFolder);
-    setCommand(commandAbout, L"About NppQuickReplace", showAbout);
+    setCommand(commandToggleEnabled,
+        tr(L"Automatic replacement enabled", L"자동 치환 사용"), toggleEnabled, nullptr, true);
+    setCommand(commandPauseCurrentDocument,
+        tr(L"Pause for current document", L"현재 문서에서 일시 중지"), togglePauseCurrentDocument);
+    setCommand(commandManualReplace,
+        tr(L"Replace trigger before caret", L"캐럿 앞 트리거 치환"), manualReplace, &gManualShortcut);
+    setCommand(commandReload,
+        tr(L"Reload settings and rules", L"설정과 규칙 다시 불러오기"), reloadAll);
+    setCommand(commandManageReplacements,
+        tr(L"Manage replacement rules…", L"치환 규칙 관리…"), manageReplacements);
+    setCommand(commandOpenDataFolder,
+        tr(L"Open data folder", L"데이터 폴더 열기"), openDataFolder);
+    setCommand(commandAbout,
+        tr(L"About NppQuickReplace", L"NppQuickReplace 정보"), showAbout);
 }
 
 void handleBufferClosed(UINT_PTR bufferId) {

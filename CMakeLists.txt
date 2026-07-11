@@ -21,6 +21,7 @@ add_library(NppQuickReplaceCore STATIC
   src/CapturePattern.cpp
   src/SnippetTemplate.cpp
   src/ConfigStore.cpp
+  src/Localization.cpp
   src/RuleExchange.cpp
   src/RuleStore.cpp
 )

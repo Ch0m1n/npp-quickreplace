@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Follow the Windows display language automatically, with Korean menus, manager controls, and common status/message localization plus English fallback for unsupported languages.
+- Extend GUI smoke coverage so localized Korean and English controls are both verified.
+
 ## 0.6.0-alpha - 2026-07-11
 
 - Add bounded linear-time capture templates with `${capture:1}` through `${capture:9}` and replacement-reference validation.
