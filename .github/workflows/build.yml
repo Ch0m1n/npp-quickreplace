@@ -11,11 +11,12 @@ permissions:
 
 jobs:
   windows-x64:
-    name: Windows x64 · ${{ matrix.configuration }}
-    runs-on: windows-2022
+    name: ${{ matrix.os }} x64 · ${{ matrix.configuration }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-2022, windows-2025]
         configuration: [Debug, Release]
     steps:
       - name: Check out source
@@ -31,12 +32,12 @@ jobs:
         run: ctest --test-dir build -C ${{ matrix.configuration }} --output-on-failure
 
       - name: Package
-        if: matrix.configuration == 'Release'
+        if: matrix.configuration == 'Release' && matrix.os == 'windows-2022'
         shell: pwsh
         run: ./scripts/build.ps1 -Configuration Release -Package
 
       - name: Upload package
-        if: matrix.configuration == 'Release'
+        if: matrix.configuration == 'Release' && matrix.os == 'windows-2022'
         uses: actions/upload-artifact@v7
         with:
           name: NppQuickReplace-x64

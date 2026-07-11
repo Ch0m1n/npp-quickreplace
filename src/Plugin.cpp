@@ -20,11 +20,13 @@
 #include "ConfigStore.h"
 #include "RuleManager.h"
 #include "RuleStore.h"
+#include "SnippetTemplate.h"
 #include "PluginInterface.h"
 
 namespace {
 
 using nppqr::Activation;
+using nppqr::CaptureMatch;
 using nppqr::ConfigStore;
 using nppqr::PluginConfig;
 using nppqr::ReplacementRule;
@@ -32,7 +34,7 @@ using nppqr::RuleManagerOptions;
 using nppqr::RuleStore;
 
 constexpr wchar_t kPluginName[] = L"NppQuickReplace";
-constexpr wchar_t kPluginVersion[] = L"0.5.0-alpha";
+constexpr wchar_t kPluginVersion[] = L"0.6.0-alpha";
 constexpr int kCommandCount = 7;
 
 enum CommandIndex : int {
@@ -56,6 +58,12 @@ std::filesystem::path gConfigPath;
 std::filesystem::path gReplacementsPath;
 std::unordered_set<UINT_PTR> gPausedBuffers;
 std::unordered_map<UINT_PTR, std::string> gExtensionCache;
+struct TabstopSession {
+    HWND editor = nullptr;
+    std::vector<Sci_Position> positions;
+    std::size_t current = 0;
+};
+std::unordered_map<UINT_PTR, TabstopSession> gTabstopSessions;
 std::wstring gPunctuationCharacters;
 bool gReady = false;
 bool gInternalEdit = false;
@@ -398,16 +406,24 @@ std::optional<std::string> clipboardTextUtf8(std::wstring& error) {
     return result;
 }
 
-std::optional<std::string> selectionTextUtf8(HWND editor, std::wstring& error) {
-    const LRESULT byteCount = ::SendMessageW(editor, SCI_GETSELTEXT, 0, 0);
-    if (byteCount <= 1) return std::string{};
-    if (static_cast<std::size_t>(byteCount - 1) > gConfig.maxExpandedBytes) {
+std::optional<std::string> selectionTextUtf8(
+    HWND editor, int selectionIndex, std::wstring& error) {
+    const int resolvedIndex = selectionIndex >= 0 ? selectionIndex : static_cast<int>(
+        ::SendMessageW(editor, SCI_GETMAINSELECTION, 0, 0));
+    const Sci_Position start = static_cast<Sci_Position>(::SendMessageW(
+        editor, SCI_GETSELECTIONNSTART, static_cast<WPARAM>(resolvedIndex), 0));
+    const Sci_Position end = static_cast<Sci_Position>(::SendMessageW(
+        editor, SCI_GETSELECTIONNEND, static_cast<WPARAM>(resolvedIndex), 0));
+    if (end <= start) return std::string{};
+    const std::size_t byteCount = static_cast<std::size_t>(end - start);
+    if (byteCount > gConfig.maxExpandedBytes) {
         error = L"Skipped a replacement because the selected text exceeds maxExpandedBytes.";
         return std::nullopt;
     }
-    std::string bytes(static_cast<std::size_t>(byteCount), '\0');
-    ::SendMessageW(editor, SCI_GETSELTEXT, 0, reinterpret_cast<LPARAM>(bytes.data()));
-    bytes.resize(static_cast<std::size_t>(byteCount - 1));
+    std::string bytes(byteCount + 1, '\0');
+    Sci_TextRangeFull range{{start, end}, bytes.data()};
+    ::SendMessageW(editor, SCI_GETTEXTRANGEFULL, 0, reinterpret_cast<LPARAM>(&range));
+    bytes.resize(byteCount);
     std::wstring wide;
     if (!documentBytesToWide(editor, bytes, wide)) {
         error = L"Skipped a replacement because the selected text could not be decoded.";
@@ -432,7 +448,8 @@ std::string makeUuidUtf8() {
     return wideToUtf8(value);
 }
 std::optional<std::string> expandBuiltInVariables(
-    HWND editor, std::string source, std::wstring& error) {
+    HWND editor, std::string source, const CaptureMatch& captures,
+    int selectionIndex, std::wstring& error) {
     if (source.size() > gConfig.maxExpandedBytes) {
         error = L"Skipped a replacement because its template exceeds maxExpandedBytes.";
         return std::nullopt;
@@ -456,8 +473,10 @@ std::optional<std::string> expandBuiltInVariables(
         !replaceVariable("${uuid}", makeUuidUtf8())) {
         return std::nullopt;
     }
-    const Sci_Position caret = static_cast<Sci_Position>(
-        ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
+    const Sci_Position caret = selectionIndex >= 0
+        ? static_cast<Sci_Position>(::SendMessageW(editor, SCI_GETSELECTIONNCARET,
+            static_cast<WPARAM>(selectionIndex), 0))
+        : static_cast<Sci_Position>(::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
     const LRESULT line = ::SendMessageW(editor, SCI_LINEFROMPOSITION, static_cast<WPARAM>(caret), 0);
     const LRESULT column = ::SendMessageW(editor, SCI_GETCOLUMN, static_cast<WPARAM>(caret), 0);
     if (!replaceVariable("${line}", std::to_string(line + 1)) ||
@@ -476,9 +495,13 @@ std::optional<std::string> expandBuiltInVariables(
         if (!replaceVariable("${clipboard}", *clipboard)) return std::nullopt;
     }
     if (source.find("${selection}") != std::string::npos) {
-        const auto selection = selectionTextUtf8(editor, error);
+        const auto selection = selectionTextUtf8(editor, selectionIndex, error);
         if (!selection.has_value()) return std::nullopt;
         if (!replaceVariable("${selection}", *selection)) return std::nullopt;
+    }
+    for (std::size_t number = 1; number < captures.values.size(); ++number) {
+        const std::string marker = "${capture:" + std::to_string(number) + "}";
+        if (!replaceVariable(marker, captures.values[number])) return std::nullopt;
     }
     if (source.size() > gConfig.maxExpandedBytes) {
         error = L"Skipped a replacement because expanded variables exceed maxExpandedBytes.";
@@ -489,48 +512,17 @@ std::optional<std::string> expandBuiltInVariables(
 struct ExpandedReplacement {
     std::string documentBytes;
     std::optional<std::size_t> cursorByteOffset;
+    std::vector<std::size_t> tabstopByteOffsets;
 };
 
 std::optional<ExpandedReplacement> expandReplacement(
-    HWND editor, std::string source, std::wstring& error) {
-    const auto expanded = expandBuiltInVariables(editor, std::move(source), error);
+    HWND editor, std::string source, const CaptureMatch& captures,
+    int selectionIndex, std::wstring& error) {
+    const auto expanded = expandBuiltInVariables(
+        editor, std::move(source), captures, selectionIndex, error);
     if (!expanded.has_value()) return std::nullopt;
-    source = std::move(*expanded);
-    constexpr std::string_view cursorMarker = "${cursor}";
-    constexpr std::string_view tabstopPrefix = "${tabstop:";
-    std::string cleaned;
-    cleaned.reserve(source.size());
-    std::optional<std::size_t> cursorPosition;
-    std::optional<std::pair<unsigned int, std::size_t>> selectedTabstop;
-    for (std::size_t index = 0; index < source.size();) {
-        if (source.substr(index).starts_with(cursorMarker)) {
-            if (!cursorPosition.has_value()) cursorPosition = cleaned.size();
-            index += cursorMarker.size();
-            continue;
-        }
-        if (source.substr(index).starts_with(tabstopPrefix)) {
-            const std::size_t numberStart = index + tabstopPrefix.size();
-            const std::size_t close = source.find('}', numberStart);
-            if (close != std::string::npos) {
-                unsigned int number = 0;
-                const auto parsed = std::from_chars(
-                    source.data() + numberStart, source.data() + close, number);
-                if (parsed.ec == std::errc{} && parsed.ptr == source.data() + close) {
-                    if (!selectedTabstop.has_value() || number < selectedTabstop->first) {
-                        selectedTabstop = std::pair{number, cleaned.size()};
-                    }
-                    index = close + 1;
-                    continue;
-                }
-            }
-        }
-        cleaned.push_back(source[index++]);
-    }
-    if (selectedTabstop.has_value()) cursorPosition = selectedTabstop->second;
-    source = std::move(cleaned);
-    const std::string beforeMarker = cursorPosition.has_value()
-        ? source.substr(0, *cursorPosition)
-        : std::string{};
+    const nppqr::SnippetExpansion snippet = nppqr::parseSnippetMarkers(*expanded);
+    source = snippet.text;
     const int eolMode = static_cast<int>(::SendMessageW(editor, SCI_GETEOLMODE, 0, 0));
     const std::string normalized = normalizeEol(source, eolMode);
     if (normalized.size() > gConfig.maxExpandedBytes) {
@@ -547,13 +539,31 @@ std::optional<ExpandedReplacement> expandReplacement(
         error = L"Skipped a replacement because encoded output exceeds maxExpandedBytes.";
         return std::nullopt;
     }
-    if (cursorPosition.has_value()) {
-        const std::string beforeNormalized = normalizeEol(beforeMarker, eolMode);
+
+    const auto encodeOffset = [&](std::size_t utf8Offset) -> std::optional<std::size_t> {
+        const std::string beforeNormalized = normalizeEol(source.substr(0, utf8Offset), eolMode);
         std::string beforeBytes;
-        if (!wideToDocumentBytes(editor, normalizeNfc(utf8ToWide(beforeNormalized)), beforeBytes)) {
+        if (!wideToDocumentBytes(
+                editor, normalizeNfc(utf8ToWide(beforeNormalized)), beforeBytes)) {
             return std::nullopt;
         }
-        result.cursorByteOffset = beforeBytes.size();
+        return beforeBytes.size();
+    };
+    if (snippet.cursorOffset.has_value()) {
+        result.cursorByteOffset = encodeOffset(*snippet.cursorOffset);
+        if (!result.cursorByteOffset.has_value()) {
+            error = L"Skipped a replacement with an unrepresentable cursor position.";
+            return std::nullopt;
+        }
+    }
+    result.tabstopByteOffsets.reserve(snippet.tabstopOffsets.size());
+    for (const std::size_t offset : snippet.tabstopOffsets) {
+        const auto encoded = encodeOffset(offset);
+        if (!encoded.has_value()) {
+            error = L"Skipped a replacement with an unrepresentable tabstop position.";
+            return std::nullopt;
+        }
+        result.tabstopByteOffsets.push_back(*encoded);
     }
     return result;
 }
@@ -578,10 +588,101 @@ private:
     bool previous_;
 };
 
+void adjustTabstopPositions(
+    TabstopSession& session, Sci_Position position, Sci_Position length, bool insertion) {
+    if (length <= 0) return;
+    const Sci_Position end = position + length;
+    for (Sci_Position& tabstop : session.positions) {
+        if (insertion) {
+            if (tabstop >= position) tabstop += length;
+        } else if (tabstop >= end) {
+            tabstop -= length;
+        } else if (tabstop >= position) {
+            tabstop = position;
+        }
+    }
+}
+
+void updateTabstopSession(const SCNotification& notification) {
+    if (gInternalEdit ||
+        (notification.modificationType & (SC_MOD_BEFOREINSERT | SC_MOD_BEFOREDELETE)) != 0) {
+        return;
+    }
+    const UINT_PTR bufferId = currentBufferId();
+    const auto existing = gTabstopSessions.find(bufferId);
+    if (existing == gTabstopSessions.end()) return;
+    TabstopSession& session = existing->second;
+    if (session.editor != static_cast<HWND>(notification.nmhdr.hwndFrom)) return;
+    if ((notification.modificationType & (SC_PERFORMED_UNDO | SC_PERFORMED_REDO)) != 0) {
+        gTabstopSessions.erase(existing);
+        return;
+    }
+    if ((notification.modificationType & SC_MOD_INSERTTEXT) != 0) {
+        adjustTabstopPositions(session, notification.position, notification.length, true);
+    } else if ((notification.modificationType & SC_MOD_DELETETEXT) != 0) {
+        adjustTabstopPositions(session, notification.position, notification.length, false);
+    }
+}
+
+bool navigateTabstop(const SCNotification& notification) {
+    if (notification.ch != '\t' || (notification.modifiers & SCMOD_SHIFT) != 0) return false;
+    HWND editor = static_cast<HWND>(notification.nmhdr.hwndFrom);
+    const UINT_PTR bufferId = currentBufferId();
+    const auto existing = gTabstopSessions.find(bufferId);
+    if (existing == gTabstopSessions.end() || existing->second.editor != editor) return false;
+    TabstopSession& session = existing->second;
+    if (session.current >= session.positions.size()) {
+        gTabstopSessions.erase(existing);
+        return false;
+    }
+    const Sci_Position caret = static_cast<Sci_Position>(
+        ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
+    const Sci_Position insertedTab = caret - 1;
+    if (insertedTab < 0 || ::SendMessageW(
+            editor, SCI_GETCHARAT, static_cast<WPARAM>(insertedTab), 0) != '\t') {
+        gTabstopSessions.erase(existing);
+        return false;
+    }
+    if (session.current + 1 >= session.positions.size()) {
+        gTabstopSessions.erase(existing);
+        return true;
+    }
+
+    {
+        ScopedUndoAction undo(editor);
+        ScopedInternalEdit internalEdit;
+        ::SendMessageW(editor, SCI_DELETERANGE,
+            static_cast<WPARAM>(insertedTab), static_cast<LPARAM>(1));
+    }
+    adjustTabstopPositions(session, insertedTab, 1, false);
+    ++session.current;
+    ::SendMessageW(editor, SCI_SETEMPTYSELECTION,
+        static_cast<WPARAM>(session.positions[session.current]), 0);
+    return true;
+}
+
+void validateTabstopSelection(const SCNotification& notification) {
+    if (gInternalEdit || (notification.updated & SC_UPDATE_SELECTION) == 0) return;
+    HWND editor = static_cast<HWND>(notification.nmhdr.hwndFrom);
+    const UINT_PTR bufferId = currentBufferId();
+    const auto existing = gTabstopSessions.find(bufferId);
+    if (existing == gTabstopSessions.end() || existing->second.editor != editor) return;
+    const TabstopSession& session = existing->second;
+    if (session.current >= session.positions.size()) {
+        gTabstopSessions.erase(existing);
+        return;
+    }
+    const Sci_Position caret = static_cast<Sci_Position>(
+        ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
+    if (caret != session.positions[session.current]) gTabstopSessions.erase(existing);
+}
+
 void applyReplacement(HWND editor, const TriggerRange& trigger,
-    const ReplacementRule& rule, Sci_Position trailingDelimiterBytes) {
+    const ReplacementRule& rule, Sci_Position trailingDelimiterBytes,
+    const CaptureMatch& captures = {}, int selectionIndex = -1) {
     std::wstring expansionError;
-    const auto replacement = expandReplacement(editor, rule.replacement, expansionError);
+    const auto replacement = expandReplacement(
+        editor, rule.replacement, captures, selectionIndex, expansionError);
     if (!replacement.has_value()) {
         logMessage(L"warning", expansionError.empty() ? L"Skipped an invalid replacement." : expansionError);
         return;
@@ -593,11 +694,158 @@ void applyReplacement(HWND editor, const TriggerRange& trigger,
     ::SendMessageW(editor, SCI_REPLACETARGET,
         static_cast<WPARAM>(replacement->documentBytes.size()),
         reinterpret_cast<LPARAM>(replacement->documentBytes.data()));
-    const Sci_Position newCaret = replacement->cursorByteOffset.has_value()
+    const UINT_PTR bufferId = currentBufferId();
+    gTabstopSessions.erase(bufferId);
+    Sci_Position newCaret = replacement->cursorByteOffset.has_value()
         ? trigger.start + static_cast<Sci_Position>(*replacement->cursorByteOffset)
         : trigger.start + static_cast<Sci_Position>(replacement->documentBytes.size()) +
             trailingDelimiterBytes;
+    if (!replacement->tabstopByteOffsets.empty() && bufferId != 0) {
+        TabstopSession session;
+        session.editor = editor;
+        session.positions.reserve(replacement->tabstopByteOffsets.size());
+        for (const std::size_t offset : replacement->tabstopByteOffsets) {
+            session.positions.push_back(trigger.start + static_cast<Sci_Position>(offset));
+        }
+        newCaret = session.positions.front();
+        gTabstopSessions.insert_or_assign(bufferId, std::move(session));
+    }
     ::SendMessageW(editor, SCI_SETEMPTYSELECTION, static_cast<WPARAM>(newCaret), 0);
+}
+
+struct PreparedMultiReplacement {
+    TriggerRange trigger;
+    ExpandedReplacement replacement;
+    Sci_Position trailingDelimiterBytes = 0;
+    int selectionIndex = 0;
+};
+
+bool replaceMultipleSelections(
+    HWND editor, Activation activation, bool immediate, int delimiterCharacter, bool manual) {
+    const int selectionCount = static_cast<int>(::SendMessageW(editor, SCI_GETSELECTIONS, 0, 0));
+    if (selectionCount <= 1) return false;
+    if (selectionCount > 256) {
+        logMessage(L"warning", L"Skipped multi-cursor replacement with more than 256 carets.");
+        return true;
+    }
+    const int mainSelection = static_cast<int>(
+        ::SendMessageW(editor, SCI_GETMAINSELECTION, 0, 0));
+    const std::string extension = currentFileExtension();
+    const std::string path = currentFilePathUtf8();
+    const std::string language = currentLanguageName();
+    std::vector<PreparedMultiReplacement> operations;
+    operations.reserve(static_cast<std::size_t>(selectionCount));
+    std::size_t totalOutputBytes = 0;
+
+    for (int selection = 0; selection < selectionCount; ++selection) {
+        const Sci_Position caret = static_cast<Sci_Position>(::SendMessageW(
+            editor, SCI_GETSELECTIONNCARET, static_cast<WPARAM>(selection), 0));
+        const Sci_Position triggerEnd = manual || immediate
+            ? caret
+            : delimiterStartFor(editor, caret, delimiterCharacter);
+        const auto trigger = readTriggerBefore(editor, triggerEnd);
+        if (!trigger.has_value()) {
+            logMessage(L"warning", L"Skipped multi-cursor replacement because a caret has no trigger.");
+            return true;
+        }
+
+        CaptureMatch captures;
+        const ReplacementRule* rule = nullptr;
+        if (manual) {
+            rule = gRules.findManual(trigger->text, extension, path, language);
+            if (rule == nullptr) {
+                rule = gRules.findCaptureTemplate(trigger->text, Activation::none,
+                    extension, path, language, captures, true);
+            }
+        } else if (immediate) {
+            rule = gRules.findImmediate(trigger->text, extension, path, language);
+        } else {
+            rule = gRules.find(trigger->text, activation, extension, path, language);
+            if (rule == nullptr) {
+                rule = gRules.findCaptureTemplate(trigger->text, activation,
+                    extension, path, language, captures);
+            }
+        }
+        if (rule == nullptr) {
+            logMessage(L"warning", L"Skipped multi-cursor replacement because not every caret matched a rule.");
+            return true;
+        }
+
+        std::wstring expansionError;
+        auto replacement = expandReplacement(
+            editor, rule->replacement, captures, selection, expansionError);
+        if (!replacement.has_value()) {
+            logMessage(L"warning", expansionError.empty()
+                ? L"Skipped an invalid multi-cursor replacement." : expansionError);
+            return true;
+        }
+        if (replacement->documentBytes.size() > gConfig.maxExpandedBytes - totalOutputBytes) {
+            logMessage(L"warning",
+                L"Skipped multi-cursor replacement because aggregate output exceeds maxExpandedBytes.");
+            return true;
+        }
+        totalOutputBytes += replacement->documentBytes.size();
+        operations.push_back({*trigger, std::move(*replacement),
+            manual || immediate ? 0 : caret - triggerEnd, selection});
+    }
+
+    std::sort(operations.begin(), operations.end(),
+        [](const PreparedMultiReplacement& left, const PreparedMultiReplacement& right) {
+            return left.trigger.start > right.trigger.start;
+        });
+    for (std::size_t index = 1; index < operations.size(); ++index) {
+        if (operations[index].trigger.end > operations[index - 1].trigger.start) {
+            logMessage(L"warning", L"Skipped overlapping multi-cursor trigger ranges.");
+            return true;
+        }
+    }
+
+    std::vector<std::pair<int, Sci_Position>> carets;
+    carets.reserve(operations.size());
+    gTabstopSessions.erase(currentBufferId());
+    {
+        ScopedUndoAction undo(editor);
+        ScopedInternalEdit internalEdit;
+        for (const PreparedMultiReplacement& operation : operations) {
+            const Sci_Position removed = operation.trigger.end - operation.trigger.start;
+            const Sci_Position inserted = static_cast<Sci_Position>(
+                operation.replacement.documentBytes.size());
+            const Sci_Position delta = inserted - removed;
+            for (auto& [selection, caret] : carets) {
+                static_cast<void>(selection);
+                if (caret >= operation.trigger.end) caret += delta;
+            }
+            ::SendMessageW(editor, SCI_SETTARGETRANGE,
+                static_cast<WPARAM>(operation.trigger.start),
+                static_cast<LPARAM>(operation.trigger.end));
+            ::SendMessageW(editor, SCI_REPLACETARGET,
+                static_cast<WPARAM>(operation.replacement.documentBytes.size()),
+                reinterpret_cast<LPARAM>(operation.replacement.documentBytes.data()));
+            Sci_Position caret = operation.trigger.start + inserted +
+                operation.trailingDelimiterBytes;
+            if (!operation.replacement.tabstopByteOffsets.empty()) {
+                caret = operation.trigger.start + static_cast<Sci_Position>(
+                    operation.replacement.tabstopByteOffsets.front());
+            } else if (operation.replacement.cursorByteOffset.has_value()) {
+                caret = operation.trigger.start + static_cast<Sci_Position>(
+                    *operation.replacement.cursorByteOffset);
+            }
+            carets.emplace_back(operation.selectionIndex, caret);
+        }
+
+        const auto main = std::find_if(carets.begin(), carets.end(),
+            [&](const auto& entry) { return entry.first == mainSelection; });
+        if (main == carets.end()) return true;
+        ::SendMessageW(editor, SCI_CLEARSELECTIONS, 0, 0);
+        ::SendMessageW(editor, SCI_SETEMPTYSELECTION, static_cast<WPARAM>(main->second), 0);
+        for (const auto& [selection, caret] : carets) {
+            if (selection == mainSelection) continue;
+            ::SendMessageW(editor, SCI_ADDSELECTION,
+                static_cast<WPARAM>(caret), static_cast<LPARAM>(caret));
+        }
+        ::SendMessageW(editor, SCI_SETMAINSELECTION, 0, 0);
+    }
+    return true;
 }
 
 void updatePunctuationCache() {
@@ -697,12 +945,16 @@ Activation activationForCharacter(int character) {
 }
 
 void processCharacterAdded(const SCNotification& notification) {
-    if (!gReady || gInternalEdit || !gConfig.pluginEnabled || isCurrentBufferPaused()) return;
+    if (gInternalEdit) return;
+    if (navigateTabstop(notification)) return;
+    if (!gReady || !gConfig.pluginEnabled || isCurrentBufferPaused()) return;
     if (notification.characterSource == SC_CHARACTERSOURCE_TENTATIVE_INPUT) return;
     HWND editor = static_cast<HWND>(notification.nmhdr.hwndFrom);
     if (editor != gNppData._scintillaMainHandle && editor != gNppData._scintillaSecondHandle) return;
     if (gConfig.skipReadOnlyDocuments && ::SendMessageW(editor, SCI_GETREADONLY, 0, 0) != 0) return;
-    if (gConfig.skipMultiSelection && ::SendMessageW(editor, SCI_GETSELECTIONS, 0, 0) > 1) return;
+    const int selectionCount = static_cast<int>(
+        ::SendMessageW(editor, SCI_GETSELECTIONS, 0, 0));
+    if (gConfig.skipMultiSelection && selectionCount > 1) return;
 
     Activation activation = activationForCharacter(notification.ch);
     if (activation == Activation::none && !gRules.hasImmediateRules()) return;
@@ -710,6 +962,10 @@ void processCharacterAdded(const SCNotification& notification) {
         ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
     const bool immediate = activation == Activation::none;
     if (immediate) activation = Activation::immediate;
+    if (selectionCount > 1) {
+        replaceMultipleSelections(editor, activation, immediate, notification.ch, false);
+        return;
+    }
     const Sci_Position triggerEnd = immediate
         ? caret
         : delimiterStartFor(editor, caret, notification.ch);
@@ -718,11 +974,16 @@ void processCharacterAdded(const SCNotification& notification) {
     const std::string extension = currentFileExtension();
     const std::string path = currentFilePathUtf8();
     const std::string language = currentLanguageName();
+    CaptureMatch captures;
     const ReplacementRule* rule = immediate
         ? gRules.findImmediate(trigger->text, extension, path, language)
         : gRules.find(trigger->text, activation, extension, path, language);
+    if (rule == nullptr && !immediate) {
+        rule = gRules.findCaptureTemplate(
+            trigger->text, activation, extension, path, language, captures);
+    }
     if (rule == nullptr) return;
-    applyReplacement(editor, *trigger, *rule, immediate ? 0 : caret - triggerEnd);
+    applyReplacement(editor, *trigger, *rule, immediate ? 0 : caret - triggerEnd, captures);
 }
 
 void processPastedText(const SCNotification& notification) {
@@ -755,14 +1016,28 @@ void manualReplace() {
     if (!gReady) return;
     HWND editor = currentEditor();
     if (editor == nullptr || ::SendMessageW(editor, SCI_GETREADONLY, 0, 0) != 0) return;
-    if (gConfig.skipMultiSelection && ::SendMessageW(editor, SCI_GETSELECTIONS, 0, 0) > 1) return;
+    const int selectionCount = static_cast<int>(
+        ::SendMessageW(editor, SCI_GETSELECTIONS, 0, 0));
+    if (gConfig.skipMultiSelection && selectionCount > 1) return;
+    if (selectionCount > 1) {
+        replaceMultipleSelections(editor, Activation::none, false, 0, true);
+        return;
+    }
     const Sci_Position caret = static_cast<Sci_Position>(
         ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
     const auto trigger = readTriggerBefore(editor, caret);
     if (!trigger.has_value()) return;
+    const std::string extension = currentFileExtension();
+    const std::string path = currentFilePathUtf8();
+    const std::string language = currentLanguageName();
+    CaptureMatch captures;
     const ReplacementRule* rule = gRules.findManual(
-        trigger->text, currentFileExtension(), currentFilePathUtf8(), currentLanguageName());
-    if (rule != nullptr) applyReplacement(editor, *trigger, *rule, 0);
+        trigger->text, extension, path, language);
+    if (rule == nullptr) {
+        rule = gRules.findCaptureTemplate(
+            trigger->text, Activation::none, extension, path, language, captures, true);
+    }
+    if (rule != nullptr) applyReplacement(editor, *trigger, *rule, 0, captures);
 }
 
 void reloadAll() {
@@ -829,6 +1104,7 @@ void handleBufferClosed(UINT_PTR bufferId) {
     if (bufferId == 0) return;
     gPausedBuffers.erase(bufferId);
     gExtensionCache.erase(bufferId);
+    gTabstopSessions.erase(bufferId);
 }
 
 } // namespace
@@ -878,13 +1154,18 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notification) {
         case NPPN_SHUTDOWN:
             saveEnabledState();
             gReady = false;
+            gTabstopSessions.clear();
             nppqr::closeRuleManager(true);
             break;
         case SCN_CHARADDED:
             processCharacterAdded(*notification);
             break;
         case SCN_MODIFIED:
+            updateTabstopSession(*notification);
             processPastedText(*notification);
+            break;
+        case SCN_UPDATEUI:
+            validateTabstopSelection(*notification);
             break;
         default:
             break;

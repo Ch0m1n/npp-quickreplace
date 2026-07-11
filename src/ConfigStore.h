@@ -15,7 +15,7 @@ struct PluginConfig {
     std::string punctuationTriggers = ".,:;!?)]}";
     bool processPaste = false;
     bool skipReadOnlyDocuments = true;
-    bool skipMultiSelection = true;
+    bool skipMultiSelection = false;
     std::size_t maxTriggerBytes = 512;
     std::size_t maxExpandedBytes = 1U * 1024U * 1024U;
     bool backupEnabled = true;

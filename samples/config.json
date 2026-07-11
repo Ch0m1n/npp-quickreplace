@@ -4,7 +4,7 @@
   "punctuationTriggers": ".,:;!?)]}",
   "processPaste": false,
   "skipReadOnlyDocuments": true,
-  "skipMultiSelection": true,
+  "skipMultiSelection": false,
   "backup": {
     "enabled": true,
     "maxFiles": 10

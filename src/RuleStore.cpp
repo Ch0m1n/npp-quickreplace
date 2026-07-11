@@ -309,6 +309,7 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
             rule.caseSensitive = item.value("caseSensitive", false);
 
             const std::string matchMode = item.value("matchMode", "wholeWord");
+            rule.captureTemplate = matchMode == "captureTemplate";
             rule.wholeWord = matchMode == "wholeWord";
             rule.fileExtensions = parseExtensions(item, rule.trigger, result.warnings);
             rule.pathGlobs = parseFilterList(item, "pathGlobs", rule.trigger, result.warnings);
@@ -355,9 +356,26 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
                 throw std::runtime_error(
                     "The aggregate trigger and replacement text exceeds the 128 MiB safety limit.");
             }
-            if (!rule.wholeWord) {
+            if (rule.captureTemplate) {
+                const auto compiled = rule.compiledCaptureTemplate.compile(
+                    rule.trigger, rule.caseSensitive);
+                if (!compiled.ok) {
+                    throw std::runtime_error("Capture template '" + rule.trigger +
+                        "' is invalid: " + compiled.error);
+                }
+                const auto replacementCaptures =
+                    rule.compiledCaptureTemplate.validateReplacement(rule.replacement);
+                if (!replacementCaptures.ok) {
+                    throw std::runtime_error("Replacement for capture template '" + rule.trigger +
+                        "' is invalid: " + replacementCaptures.error);
+                }
+                if (contains(rule.activation, Activation::immediate)) {
+                    throw std::runtime_error("Capture template '" + rule.trigger +
+                        "' cannot use immediate activation.");
+                }
+            } else if (!rule.wholeWord) {
                 result.warnings.push_back(
-                    "Trigger '" + rule.trigger + "' requests matchMode '" + matchMode +
+                    "Trigger '" + rule.trigger + "' requests unsupported matchMode '" + matchMode +
                     "'; whole-word matching is used.");
                 rule.wholeWord = true;
             }
@@ -384,7 +402,9 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
         std::vector<std::pair<std::string, std::size_t>> prefixOrder;
         prefixOrder.reserve(parsedRules.size());
         for (std::size_t index = 0; index < parsedRules.size(); ++index) {
-            prefixOrder.emplace_back(foldAscii(parsedRules[index].trigger), index);
+            if (!parsedRules[index].captureTemplate) {
+                prefixOrder.emplace_back(foldAscii(parsedRules[index].trigger), index);
+            }
         }
         std::sort(prefixOrder.begin(), prefixOrder.end(), [](const auto& left, const auto& right) {
             return left.first < right.first;
@@ -416,11 +436,14 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
         }
         RuleIndex exactIndex;
         RuleIndex foldedIndex;
+        std::vector<std::size_t> captureTemplateIndices;
         exactIndex.reserve(parsedRules.size());
         foldedIndex.reserve(parsedRules.size());
         for (std::size_t index = 0; index < parsedRules.size(); ++index) {
             const ReplacementRule& rule = parsedRules[index];
-            if (rule.caseSensitive) {
+            if (rule.captureTemplate) {
+                captureTemplateIndices.push_back(index);
+            } else if (rule.caseSensitive) {
                 exactIndex.emplace(rule.trigger, index);
             } else {
                 foldedIndex.emplace(foldAscii(rule.trigger), index);
@@ -433,6 +456,7 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
         rules_ = std::move(parsedRules);
         exactIndex_ = std::move(exactIndex);
         foldedIndex_ = std::move(foldedIndex);
+        captureTemplateIndices_ = std::move(captureTemplateIndices);
         hasImmediateRules_ = hasImmediateRules;
         result.ok = true;
         result.loadedCount = rules_.size();
@@ -471,6 +495,28 @@ const ReplacementRule* RuleStore::findManual(
         currentExtension, currentPath, currentLanguage, true);
 }
 
+const ReplacementRule* RuleStore::findCaptureTemplate(
+    std::string_view trigger,
+    Activation activation,
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage,
+    CaptureMatch& captures,
+    bool manual) const {
+    for (const std::size_t index : captureTemplateIndices_) {
+        const ReplacementRule& rule = rules_[index];
+        if (!rule.enabled || !rule.groupEnabled ||
+            !filtersMatch(rule, currentExtension, currentPath, currentLanguage) ||
+            (!manual && !contains(rule.activation, activation))) {
+            continue;
+        }
+        const auto matched = rule.compiledCaptureTemplate.match(trigger);
+        if (!matched.has_value()) continue;
+        captures = *matched;
+        return &rule;
+    }
+    return nullptr;
+}
 const ReplacementRule* RuleStore::findIndexed(
     std::string_view trigger,
     Activation activation,

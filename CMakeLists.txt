@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   NppQuickReplace
-  VERSION 0.5.0
+  VERSION 0.6.0
   DESCRIPTION "Fast, local text expansion for Notepad++"
   LANGUAGES CXX RC
 )
@@ -18,6 +18,8 @@ if(MSVC)
 endif()
 
 add_library(NppQuickReplaceCore STATIC
+  src/CapturePattern.cpp
+  src/SnippetTemplate.cpp
   src/ConfigStore.cpp
   src/RuleExchange.cpp
   src/RuleStore.cpp
@@ -94,8 +96,8 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS NppQuickReplace
-  RUNTIME DESTINATION NppQuickReplace
-  LIBRARY DESTINATION NppQuickReplace
+  RUNTIME DESTINATION .
+  LIBRARY DESTINATION .
 )
 install(FILES
   samples/config.json
@@ -104,17 +106,18 @@ install(FILES
   CHANGELOG.md
   LICENSE
   THIRD_PARTY_NOTICES.md
-  DESTINATION NppQuickReplace
+  DESTINATION .
 )
 install(FILES
   docs/architecture.md
   docs/planning-ko.md
-  DESTINATION NppQuickReplace/docs
+  docs/release-checklist.md
+  DESTINATION docs
 )
 install(FILES
   third_party/nlohmann/LICENSE.MIT
   third_party/notepadpp/LICENSE.txt
-  DESTINATION NppQuickReplace/licenses
+  DESTINATION licenses
 )
 
 set(CPACK_GENERATOR ZIP)

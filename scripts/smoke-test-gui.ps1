@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$NotepadPlusPlus = "$env:ProgramFiles\Notepad++\notepad++.exe",
     [int]$TimeoutSeconds = 15
@@ -123,7 +123,7 @@ try {
 
     $manager = Wait-Window { $_.Title -like '*NppQuickReplace*Replacement Manager*' } 'the replacement manager'
     $texts = Get-ChildTexts $manager.Handle
-    foreach ($required in @('Path globs','Languages','Set state','Preview')) {
+    foreach ($required in @('Path globs','Languages','Capture template','Set state','Preview')) {
         if (-not ($texts | Where-Object { $_.Replace('&','') -like "*$required*" })) {
             throw "Manager control '$required' was not found."
         }
@@ -144,7 +144,7 @@ try {
     $crashes = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$started; Id=1000} -ErrorAction SilentlyContinue |
         Where-Object { $_.Message -like '*notepad++.exe*' }
     if ($crashes) { throw 'Windows recorded an Application Error for notepad++.exe during the smoke test.' }
-    Write-Host 'GUI smoke test passed: manager controls, nested group window, responsiveness, and clean shutdown.'
+    Write-Host 'GUI smoke test passed: capture-template UI, manager controls, nested group window, responsiveness, and clean shutdown.'
 }
 finally {
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }

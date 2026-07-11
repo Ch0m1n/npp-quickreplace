@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-alpha - 2026-07-11
+
+- Add bounded linear-time capture templates with `${capture:1}` through `${capture:9}` and replacement-reference validation.
+- Add native manager controls, list summaries, preview placeholders, samples, and CSV round-trip support for capture-template rules.
+- Add full single-cursor tabstop sessions ordered as 1–9 then 0, with edit-aware position tracking and automatic cancellation on caret moves, undo, redo, buffer close, and shutdown.
+- Add safe multi-cursor replacement for up to 256 carets with all-or-nothing rule/range validation, aggregate output bounds, per-caret variables, descending edits, and one Undo action.
+- Add a tested standalone snippet-marker parser and expand capture/template unit coverage.
+- Change the new-install default to enable validated multi-cursor replacement while retaining `skipMultiSelection` as an opt-out.
+- Make the release ZIP Plugin Admin-compatible by placing the DLL at the archive root.
+- Add reproducible local build/package and optional Authenticode signing scripts plus release and Plugin Admin preparation documentation.
+
 ## 0.5.0-alpha - 2026-07-11
 
 - Prevent stale manager drafts from overwriting externally changed rules and offer reload or save-copy recovery.

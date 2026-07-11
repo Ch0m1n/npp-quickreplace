@@ -1,4 +1,5 @@
 #include "RuleStore.h"
+#include "SnippetTemplate.h"
 
 #include <windows.h>
 
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 #include "ConfigStore.h"
@@ -166,6 +168,50 @@ void testImmediateRulesAndPrefixSafety() {
     expect(store.size() == 2, "failed immediate load remains transactional");
 }
 
+void testCaptureTemplates() {
+    nppqr::CapturePattern pattern;
+    const auto compiled = pattern.compile("Issue-${capture:1}-${capture:2}", false);
+    expect(compiled.ok, "capture template compiles");
+    const auto matched = pattern.match("issue-42-open");
+    expect(matched.has_value(), "capture template matches ASCII case-insensitively");
+    expect(matched.has_value() && matched->values[1] == "42" && matched->values[2] == "open",
+        "capture template preserves original captured text");
+
+    nppqr::CapturePattern invalid;
+    expect(!invalid.compile("${capture:1}${capture:2}", true).ok,
+        "adjacent capture markers are rejected as ambiguous");
+
+    nppqr::RuleStore store;
+    const auto loaded = store.loadFromText(R"json({"version":1,"items":[{
+      "id":"capture","trigger":"ticket-${capture:1}-${capture:2}",
+      "replacement":"Ticket ${capture:1}: ${capture:2}",
+      "matchMode":"captureTemplate","activation":["space"]
+    }]})json");
+    expect(loaded.ok, "capture-template rule loads");
+    expect(store.find("ticket-17-ready", nppqr::Activation::space, "") == nullptr,
+        "capture-template rules stay out of the literal hash index");
+    nppqr::CaptureMatch captures;
+    const auto* rule = store.findCaptureTemplate(
+        "ticket-17-ready", nppqr::Activation::space, "", "", "", captures);
+    expect(rule != nullptr && captures.values[1] == "17" && captures.values[2] == "ready",
+        "RuleStore returns a capture-template match and captures");
+
+    const auto undefinedCapture = store.loadFromText(R"json({"version":1,"items":[{
+      "trigger":"x-${capture:1}","replacement":"${capture:2}",
+      "matchMode":"captureTemplate","activation":["space"]
+    }]})json");
+    expect(!undefinedCapture.ok, "undefined replacement captures are rejected");
+
+    const auto immediate = store.loadFromText(R"json({"version":1,"items":[{
+      "trigger":"x-${capture:1}","replacement":"bad",
+      "matchMode":"captureTemplate","activation":["immediate"]
+    }]})json");
+    expect(!immediate.ok, "capture templates reject immediate activation");
+    nppqr::CaptureMatch preserved;
+    expect(store.findCaptureTemplate(
+        "ticket-18-kept", nppqr::Activation::space, "", "", "", preserved) != nullptr,
+        "failed capture-template reload keeps the previous valid rule set");
+}
 void testPathAndLanguageFilters() {
     nppqr::RuleStore store;
     const auto loaded = store.loadFromText(R"json({"version":1,"items":[{
@@ -382,6 +428,27 @@ void testDelimitedImportModesAndValidation() {
         "spreadsheet-safe export prefixes risky formula cells");
 }
 
+void testSnippetMarkers() {
+    const auto ordered = nppqr::parseSnippetMarkers(
+        "A${tabstop:2}B${tabstop:1}C${tabstop:0}D");
+    expect(ordered.text == "ABCD", "snippet markers are removed from output");
+    expect(ordered.tabstopOffsets == std::vector<std::size_t>({2, 1, 3}),
+        "tabstops are ordered as 1..9 followed by 0");
+
+    const auto cursorFinal = nppqr::parseSnippetMarkers(
+        "x${tabstop:1}y${cursor}z");
+    expect(cursorFinal.tabstopOffsets == std::vector<std::size_t>({1, 2}),
+        "cursor marker becomes the final stop when tabstop 0 is absent");
+
+    const auto cursorOnly = nppqr::parseSnippetMarkers("a${cursor}b");
+    expect(cursorOnly.cursorOffset == 1 && cursorOnly.tabstopOffsets.empty(),
+        "a lone cursor marker remains a simple cursor position");
+
+    const auto invalid = nppqr::parseSnippetMarkers("${tabstop:10}");
+    expect(invalid.text == "${tabstop:10}" && invalid.tabstopOffsets.empty(),
+        "unsupported tabstop numbers remain literal");
+}
+
 void testTenThousandRules() {
     nlohmann::json root;
     root["version"] = 1;
@@ -419,11 +486,13 @@ int main() {
     testDelimiterClassification();
     testValidationAndTransactionalLoad();
     testImmediateRulesAndPrefixSafety();
+    testCaptureTemplates();
     testPathAndLanguageFilters();
     testUnicodeNormalization();
     testConfigPreservationAndBackups();
     testDelimitedExchangeRoundTrip();
     testDelimitedImportModesAndValidation();
+    testSnippetMarkers();
     testTenThousandRules();
 
     if (failures != 0) {

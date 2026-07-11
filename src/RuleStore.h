@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "CapturePattern.h"
+
 namespace nppqr {
 
 enum class Activation : std::uint32_t {
@@ -38,6 +40,8 @@ struct ReplacementRule {
     std::string group;
     bool caseSensitive = false;
     bool wholeWord = true;
+    bool captureTemplate = false;
+    CapturePattern compiledCaptureTemplate;
     Activation activation = Activation::space | Activation::enter | Activation::tab;
     std::vector<std::string> fileExtensions;
     std::vector<std::string> pathGlobs;
@@ -75,6 +79,14 @@ public:
         std::string_view currentPath = {},
         std::string_view currentLanguage = {}) const;
 
+    [[nodiscard]] const ReplacementRule* findCaptureTemplate(
+        std::string_view trigger,
+        Activation activation,
+        std::string_view currentExtension,
+        std::string_view currentPath,
+        std::string_view currentLanguage,
+        CaptureMatch& captures,
+        bool manual = false) const;
     [[nodiscard]] std::size_t size() const noexcept { return rules_.size(); }
     [[nodiscard]] const std::vector<ReplacementRule>& rules() const noexcept { return rules_; }
     [[nodiscard]] bool hasImmediateRules() const noexcept { return hasImmediateRules_; }
@@ -120,6 +132,7 @@ private:
     std::vector<ReplacementRule> rules_;
     RuleIndex exactIndex_;
     RuleIndex foldedIndex_;
+    std::vector<std::size_t> captureTemplateIndices_;
     bool hasImmediateRules_ = false;
 };
 

@@ -26,7 +26,12 @@
       "group": "wows",
       "matchMode": "wholeWord",
       "caseSensitive": false,
-      "activation": ["space", "enter", "tab", "punctuation"],
+      "activation": [
+        "space",
+        "enter",
+        "tab",
+        "punctuation"
+      ],
       "fileExtensions": [],
       "pathGlobs": [],
       "languages": [],
@@ -40,7 +45,10 @@
       "group": "common",
       "matchMode": "wholeWord",
       "caseSensitive": false,
-      "activation": ["space", "enter"],
+      "activation": [
+        "space",
+        "enter"
+      ],
       "fileExtensions": [],
       "pathGlobs": [],
       "languages": []
@@ -49,15 +57,41 @@
       "id": "sample-patch-template",
       "enabled": true,
       "trigger": "patchtpl",
-      "replacement": "변경 전:\n변경 후:\n변경 사유: ${cursor}",
+      "replacement": "변경 전: ${tabstop:1}\n변경 후: ${tabstop:2}\n변경 사유: ${tabstop:0}",
       "group": "templates",
       "matchMode": "wholeWord",
       "caseSensitive": false,
-      "activation": ["space", "enter", "tab"],
-      "fileExtensions": [".txt", ".md"],
+      "activation": [
+        "space",
+        "enter",
+        "tab"
+      ],
+      "fileExtensions": [
+        ".txt",
+        ".md"
+      ],
       "pathGlobs": [],
       "languages": []
+    },
+    {
+      "id": "sample-ticket-capture",
+      "enabled": true,
+      "trigger": "ticket-${capture:1}-${capture:2}",
+      "replacement": "Ticket #${capture:1}: ${capture:2}",
+      "group": "templates",
+      "matchMode": "captureTemplate",
+      "caseSensitive": false,
+      "activation": [
+        "space",
+        "enter"
+      ],
+      "fileExtensions": [
+        ".txt",
+        ".md"
+      ],
+      "pathGlobs": [],
+      "languages": [],
+      "description": "숫자와 상태를 선형 시간 캡처로 재사용하는 예시"
     }
   ]
 }
-

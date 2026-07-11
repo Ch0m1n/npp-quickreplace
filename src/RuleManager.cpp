@@ -55,7 +55,7 @@ enum ControlId : int {
     idPunctuation,
     idImmediate,
     idCaseSensitive,
-    idWholeWord,
+    idCaptureTemplate,
     idExtensions,
     idPathGlobs,
     idLanguages,
@@ -207,6 +207,10 @@ std::wstring activationSummary(const Json& item) {
         if (!hasActivation(item, key)) continue;
         if (!result.empty()) result.append(L", ");
         result.append(label);
+    }
+    if (item.value("matchMode", "wholeWord") == "captureTemplate") {
+        if (!result.empty()) result.append(L" · ");
+        result.append(L"Capture");
     }
     return result;
 }
@@ -448,9 +452,11 @@ private:
         detailsTitle_ = makeLabel(L"Rule details");
         detailsHint_ = makeLabel(L"Changes stay in the draft until you save the document.");
         enabled_ = makeButton(L"Rule enabled", idEnabled, BS_AUTOCHECKBOX);
-        triggerLabel_ = makeLabel(L"Trigger");
+        triggerLabel_ = makeLabel(L"Trigger / capture template");
         trigger_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idTrigger);
+        ::SendMessageW(trigger_, EM_SETCUEBANNER, TRUE,
+            reinterpret_cast<LPARAM>(L"Literal trigger, or ticket-${capture:1}"));
         groupLabel_ = makeLabel(L"Group ID");
         group_ = makeControl(WS_EX_CLIENTEDGE, WC_COMBOBOXW, L"",
             WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL, idGroup);
@@ -461,8 +467,7 @@ private:
         punctuation_ = makeButton(L"Punctuation", idPunctuation, BS_AUTOCHECKBOX);
         immediate_ = makeButton(L"Immediate", idImmediate, BS_AUTOCHECKBOX);
         caseSensitive_ = makeButton(L"Case sensitive", idCaseSensitive, BS_AUTOCHECKBOX);
-        wholeWord_ = makeButton(L"Whole word", idWholeWord, BS_AUTOCHECKBOX);
-        ::EnableWindow(wholeWord_, FALSE);
+        captureTemplate_ = makeButton(L"Capture template", idCaptureTemplate, BS_AUTOCHECKBOX);
         extensionsLabel_ = makeLabel(L"File extensions");
         extensions_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_AUTOHSCROLL, idExtensions);
@@ -581,7 +586,7 @@ private:
         place(punctuation_, rightX + scale(202), checkY, scale(106), scale(24));
         place(immediate_, rightX + scale(308), checkY, scale(94), scale(24));
         place(caseSensitive_, rightX, checkY + scale(28), scale(126), scale(24));
-        place(wholeWord_, rightX + scale(134), checkY + scale(28), scale(110), scale(24));
+        place(captureTemplate_, rightX + scale(134), checkY + scale(28), scale(142), scale(24));
 
         const int extensionsY = checkY + scale(58);
         place(extensionsLabel_, rightX, extensionsY, rightWidth, scale(18));
@@ -836,7 +841,7 @@ private:
         setCheck(punctuation_, hasActivation(item, "punctuation"));
         setCheck(immediate_, hasActivation(item, "immediate"));
         setCheck(caseSensitive_, item.value("caseSensitive", false));
-        setCheck(wholeWord_, true);
+        setCheck(captureTemplate_, item.value("matchMode", "wholeWord") == "captureTemplate");
         setText(extensions_, joinExtensions(item));
         setText(pathGlobs_, joinStringArray(item, "pathGlobs"));
         setText(languages_, joinStringArray(item, "languages"));
@@ -857,17 +862,16 @@ private:
     }
 
     void setDetailsEnabled(bool enabled) {
-        const std::array<HWND, 16> editable{{enabled_, trigger_, group_, space_, enter_, tab_,
-            punctuation_, immediate_, caseSensitive_, extensions_, pathGlobs_, languages_,
-            replacement_, description_, preview_, applyDraft_}};
+        const std::array<HWND, 17> editable{{enabled_, trigger_, group_, space_, enter_, tab_,
+            punctuation_, immediate_, caseSensitive_, captureTemplate_, extensions_, pathGlobs_,
+            languages_, replacement_, description_, preview_, applyDraft_}};
         for (HWND control : editable) ::EnableWindow(control, enabled);
-        ::EnableWindow(wholeWord_, FALSE);
         if (!enabled) {
             loading_ = true;
             for (HWND control : {trigger_, group_, extensions_, pathGlobs_, languages_,
                     replacement_, description_}) setText(control, L"");
             for (HWND control : {enabled_, space_, enter_, tab_, punctuation_, immediate_,
-                    caseSensitive_, wholeWord_}) setCheck(control, false);
+                    caseSensitive_, captureTemplate_}) setCheck(control, false);
             loading_ = false;
             setDetailStatus(L"Select a rule to edit it.");
         }
@@ -910,7 +914,7 @@ private:
             }
         }
         item["group"] = groupId;
-        item["matchMode"] = "wholeWord";
+        item["matchMode"] = isChecked(captureTemplate_) ? "captureTemplate" : "wholeWord";
         item["caseSensitive"] = isChecked(caseSensitive_);
         item["description"] = wideToUtf8(windowText(description_));
         if (!item.contains("id") || !item["id"].is_string() || item["id"].get<std::string>().empty()) {
@@ -1177,6 +1181,10 @@ private:
         replaceAllWide(preview, L"${uuid}", L"[new UUID]");
         replaceAllWide(preview, L"${line}", L"[line number]");
         replaceAllWide(preview, L"${column}", L"[column number]");
+        for (unsigned int capture = 1; capture <= 9; ++capture) {
+            replaceAllWide(preview, L"${capture:" + std::to_wstring(capture) + L"}",
+                L"[capture " + std::to_wstring(capture) + L"]");
+        }
         replaceAllWide(preview, L"${tabstop:0}", L"│");
         replaceAllWide(preview, L"${tabstop:1}", L"│");
         replaceAllWide(preview, L"${tabstop:2}", L"│");
@@ -1457,10 +1465,18 @@ private:
             return;
         }
         if ((id == idEnabled || id == idSpace || id == idEnter || id == idTab ||
-             id == idPunctuation || id == idImmediate || id == idCaseSensitive) &&
-            notification == BN_CLICKED) {
+             id == idPunctuation || id == idImmediate || id == idCaseSensitive ||
+             id == idCaptureTemplate) && notification == BN_CLICKED) {
+            std::wstring status = L"Draft detail has unapplied changes.";
+            if (id == idCaptureTemplate && isChecked(captureTemplate_) && isChecked(immediate_)) {
+                setCheck(immediate_, false);
+                status = L"Capture templates cannot use Immediate; Immediate was turned off.";
+            } else if (id == idImmediate && isChecked(immediate_) && isChecked(captureTemplate_)) {
+                setCheck(captureTemplate_, false);
+                status = L"Immediate uses literal matching; Capture template was turned off.";
+            }
             detailsDirty_ = selectedDocumentIndex_.has_value();
-            if (detailsDirty_) setDetailStatus(L"Draft detail has unapplied changes.");
+            if (detailsDirty_) setDetailStatus(status);
             updateWindowTitle();
             return;
         }
@@ -1595,7 +1611,7 @@ private:
     HWND punctuation_ = nullptr;
     HWND immediate_ = nullptr;
     HWND caseSensitive_ = nullptr;
-    HWND wholeWord_ = nullptr;
+    HWND captureTemplate_ = nullptr;
     HWND extensionsLabel_ = nullptr;
     HWND extensions_ = nullptr;
     HWND pathGlobsLabel_ = nullptr;
