@@ -150,6 +150,65 @@ std::vector<std::string> parseExtensions(
     return result;
 }
 
+std::vector<std::string> parseFilterList(
+    const Json& item,
+    std::string_view field,
+    std::string_view trigger,
+    std::vector<std::string>& warnings) {
+    std::vector<std::string> result;
+    const auto iterator = item.find(std::string(field));
+    if (iterator == item.end()) return result;
+    if (!iterator->is_array()) {
+        warnings.push_back("Trigger '" + std::string(trigger) + "' has non-array " +
+            std::string(field) + ".");
+        return result;
+    }
+    if (iterator->size() > 256) {
+        throw std::runtime_error("Trigger '" + std::string(trigger) + "' has too many " +
+            std::string(field) + " entries.");
+    }
+    for (const auto& entry : *iterator) {
+        if (!entry.is_string()) {
+            warnings.push_back("Trigger '" + std::string(trigger) + "' has a non-text " +
+                std::string(field) + " entry.");
+            continue;
+        }
+        std::string value = RuleStore::foldAscii(entry.get<std::string>());
+        std::replace(value.begin(), value.end(), '\\', '/');
+        if (value.size() > 1024) {
+            throw std::runtime_error("A " + std::string(field) + " entry for trigger '" +
+                std::string(trigger) + "' exceeds 1024 bytes.");
+        }
+        if (!value.empty()) result.push_back(std::move(value));
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+bool globMatches(std::string_view pattern, std::string_view value) {
+    std::size_t patternIndex = 0;
+    std::size_t valueIndex = 0;
+    std::size_t star = std::string_view::npos;
+    std::size_t retry = 0;
+    while (valueIndex < value.size()) {
+        if (patternIndex < pattern.size() &&
+            (pattern[patternIndex] == '?' || pattern[patternIndex] == value[valueIndex])) {
+            ++patternIndex;
+            ++valueIndex;
+        } else if (patternIndex < pattern.size() && pattern[patternIndex] == '*') {
+            star = patternIndex++;
+            retry = valueIndex;
+        } else if (star != std::string_view::npos) {
+            patternIndex = star + 1;
+            valueIndex = ++retry;
+        } else {
+            return false;
+        }
+    }
+    while (patternIndex < pattern.size() && pattern[patternIndex] == '*') ++patternIndex;
+    return patternIndex == pattern.size();
+}
 bool startsWithForRule(const ReplacementRule& prefix, const ReplacementRule& candidate) {
     if (prefix.trigger.size() >= candidate.trigger.size()) {
         return false;
@@ -252,6 +311,8 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
             const std::string matchMode = item.value("matchMode", "wholeWord");
             rule.wholeWord = matchMode == "wholeWord";
             rule.fileExtensions = parseExtensions(item, rule.trigger, result.warnings);
+            rule.pathGlobs = parseFilterList(item, "pathGlobs", rule.trigger, result.warnings);
+            rule.languages = parseFilterList(item, "languages", rule.trigger, result.warnings);
 
             const auto activationIterator = item.find("activation");
             rule.activation = activationIterator == item.end()
@@ -385,29 +446,41 @@ RuleLoadResult RuleStore::loadFromText(std::string_view jsonText) {
 const ReplacementRule* RuleStore::find(
     std::string_view trigger,
     Activation activation,
-    std::string_view currentExtension) const {
-    return findIndexed(trigger, activation, currentExtension, false);
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage) const {
+    return findIndexed(
+        trigger, activation, currentExtension, currentPath, currentLanguage, false);
 }
 
 const ReplacementRule* RuleStore::findImmediate(
     std::string_view trigger,
-    std::string_view currentExtension) const {
-    return findIndexed(trigger, Activation::immediate, currentExtension, false);
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage) const {
+    return findIndexed(trigger, Activation::immediate,
+        currentExtension, currentPath, currentLanguage, false);
 }
 
 const ReplacementRule* RuleStore::findManual(
     std::string_view trigger,
-    std::string_view currentExtension) const {
-    return findIndexed(trigger, Activation::none, currentExtension, true);
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage) const {
+    return findIndexed(trigger, Activation::none,
+        currentExtension, currentPath, currentLanguage, true);
 }
 
 const ReplacementRule* RuleStore::findIndexed(
     std::string_view trigger,
     Activation activation,
     std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage,
     bool manual) const {
     const auto isEligible = [&](const ReplacementRule& rule) {
-        return rule.enabled && rule.groupEnabled && extensionMatches(rule, currentExtension) &&
+        return rule.enabled && rule.groupEnabled &&
+               filtersMatch(rule, currentExtension, currentPath, currentLanguage) &&
                (manual || contains(rule.activation, activation));
     };
 
@@ -421,22 +494,17 @@ const ReplacementRule* RuleStore::findIndexed(
     const auto exact = exactIndex_.find(normalizedTrigger);
     if (exact != exactIndex_.end()) {
         const ReplacementRule& rule = rules_[exact->second];
-        if (isEligible(rule)) {
-            return &rule;
-        }
+        if (isEligible(rule)) return &rule;
     }
 
     const std::string foldedTrigger = foldAscii(normalizedTrigger);
     const auto folded = foldedIndex_.find(foldedTrigger);
     if (folded != foldedIndex_.end()) {
         const ReplacementRule& rule = rules_[folded->second];
-        if (isEligible(rule)) {
-            return &rule;
-        }
+        if (isEligible(rule)) return &rule;
     }
     return nullptr;
 }
-
 Activation RuleStore::activationForCharacter(
     int character,
     std::string_view punctuationCharacters) noexcept {
@@ -465,19 +533,36 @@ std::string RuleStore::foldAscii(std::string_view value) {
     return result;
 }
 
-bool RuleStore::extensionMatches(
+bool RuleStore::filtersMatch(
     const ReplacementRule& rule,
-    std::string_view currentExtension) {
-    if (rule.fileExtensions.empty()) {
-        return true;
+    std::string_view currentExtension,
+    std::string_view currentPath,
+    std::string_view currentLanguage) {
+    if (!rule.fileExtensions.empty()) {
+        if (currentExtension.empty()) return false;
+        const std::string normalizedExtension = foldAscii(currentExtension);
+        if (!std::binary_search(
+                rule.fileExtensions.begin(), rule.fileExtensions.end(), normalizedExtension)) {
+            return false;
+        }
     }
-    if (currentExtension.empty()) {
-        return false;
+    if (!rule.languages.empty()) {
+        if (currentLanguage.empty()) return false;
+        const std::string normalizedLanguage = foldAscii(currentLanguage);
+        if (!std::binary_search(
+                rule.languages.begin(), rule.languages.end(), normalizedLanguage)) {
+            return false;
+        }
     }
-
-    const std::string normalized = foldAscii(currentExtension);
-    return std::binary_search(
-        rule.fileExtensions.begin(), rule.fileExtensions.end(), normalized);
+    if (!rule.pathGlobs.empty()) {
+        if (currentPath.empty()) return false;
+        std::string normalizedPath = foldAscii(currentPath);
+        std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+        if (std::none_of(rule.pathGlobs.begin(), rule.pathGlobs.end(),
+                [&](const std::string& pattern) { return globMatches(pattern, normalizedPath); })) {
+            return false;
+        }
+    }
+    return true;
 }
-
 } // namespace nppqr

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -16,6 +17,7 @@ struct PluginConfig {
     bool skipReadOnlyDocuments = true;
     bool skipMultiSelection = true;
     std::size_t maxTriggerBytes = 512;
+    std::size_t maxExpandedBytes = 1U * 1024U * 1024U;
     bool backupEnabled = true;
     std::size_t maxBackupFiles = 10;
     bool loggingEnabled = false;
@@ -26,6 +28,20 @@ struct ConfigLoadResult {
     bool ok = false;
     std::string error;
     std::vector<std::string> warnings;
+};
+
+struct FileStamp {
+    bool exists = false;
+    std::uint64_t size = 0;
+    std::uint64_t lastWrite = 0;
+
+    bool operator==(const FileStamp&) const = default;
+};
+
+enum class AtomicWriteResult {
+    written,
+    conflict,
+    failed,
 };
 
 class ConfigStore {
@@ -52,6 +68,20 @@ public:
         const std::filesystem::path& path,
         std::string_view content,
         std::string& error);
+
+    static AtomicWriteResult writeUtf8FileAtomicIfUnchanged(
+        const std::filesystem::path& path,
+        std::uint64_t expectedContentHash,
+        std::string_view content,
+        std::string& error);
+
+    static bool fileStamp(
+        const std::filesystem::path& path,
+        FileStamp& stamp,
+        std::string& error);
+
+    [[nodiscard]] static std::uint64_t contentHash(
+        std::string_view content) noexcept;
 
     static bool backupReplacements(
         const std::filesystem::path& dataDirectory,

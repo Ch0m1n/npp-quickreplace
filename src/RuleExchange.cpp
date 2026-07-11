@@ -34,6 +34,9 @@ std::vector<std::vector<std::string>> parseDelimited(std::string_view text, char
     std::string field;
     bool quoted = false;
     bool fieldStarted = false;
+    bool quoteClosed = false;
+    std::size_t line = 1;
+    std::size_t column = 1;
 
     std::size_t index = 0;
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEFU &&
@@ -41,6 +44,18 @@ std::vector<std::vector<std::string>> parseDelimited(std::string_view text, char
         static_cast<unsigned char>(text[2]) == 0xBFU) {
         index = 3;
     }
+    const auto finishField = [&]() {
+        row.push_back(std::move(field));
+        field.clear();
+        fieldStarted = false;
+        quoteClosed = false;
+    };
+    const auto finishRow = [&]() {
+        finishField();
+        const bool blank = row.size() == 1 && row.front().empty();
+        if (!blank) rows.push_back(std::move(row));
+        row.clear();
+    };
     for (; index < text.size(); ++index) {
         const char character = text[index];
         if (quoted) {
@@ -48,43 +63,59 @@ std::vector<std::vector<std::string>> parseDelimited(std::string_view text, char
                 if (index + 1 < text.size() && text[index + 1] == '"') {
                     field.push_back('"');
                     ++index;
+                    column += 2;
                 } else {
                     quoted = false;
+                    quoteClosed = true;
+                    ++column;
                 }
+            } else if (character == '\r' || character == '\n') {
+                field.push_back(character);
+                if (character == '\r' && index + 1 < text.size() && text[index + 1] == '\n') {
+                    field.push_back('\n');
+                    ++index;
+                }
+                ++line;
+                column = 1;
             } else {
                 field.push_back(character);
+                ++column;
             }
             continue;
         }
-        if (character == '"' && !fieldStarted) {
+        if (quoteClosed && character != delimiter && character != '\r' && character != '\n') {
+            throw std::runtime_error("Unexpected character after a closing quote at line " +
+                std::to_string(line) + ", column " + std::to_string(column) + ".");
+        }
+        if (character == '"') {
+            if (fieldStarted) {
+                throw std::runtime_error("Unexpected quote in an unquoted field at line " +
+                    std::to_string(line) + ", column " + std::to_string(column) + ".");
+            }
             quoted = true;
             fieldStarted = true;
+            ++column;
         } else if (character == delimiter) {
-            row.push_back(std::move(field));
-            field.clear();
-            fieldStarted = false;
+            finishField();
+            ++column;
         } else if (character == '\r' || character == '\n') {
             if (character == '\r' && index + 1 < text.size() && text[index + 1] == '\n') ++index;
-            row.push_back(std::move(field));
-            field.clear();
-            fieldStarted = false;
-            const bool blank = row.size() == 1 && row.front().empty();
-            if (!blank) rows.push_back(std::move(row));
-            row.clear();
+            finishRow();
+            ++line;
+            column = 1;
         } else {
             field.push_back(character);
             fieldStarted = true;
+            ++column;
         }
     }
-    if (quoted) throw std::runtime_error("The delimited file ends inside a quoted field.");
-    if (fieldStarted || !field.empty() || !row.empty()) {
-        row.push_back(std::move(field));
-        const bool blank = row.size() == 1 && row.front().empty();
-        if (!blank) rows.push_back(std::move(row));
+    if (quoted) {
+        throw std::runtime_error("The delimited file ends inside a quoted field at line " +
+            std::to_string(line) + ", column " + std::to_string(column) + ".");
     }
+    if (fieldStarted || quoteClosed || !field.empty() || !row.empty()) finishRow();
     return rows;
 }
-
 bool parseBoolean(std::string value, bool defaultValue) {
     value = RuleStore::foldAscii(trimAscii(std::move(value)));
     if (value.empty()) return defaultValue;
@@ -133,24 +164,43 @@ std::string quoteField(std::string_view value, char delimiter) {
     return result;
 }
 
-std::string makeImportId(std::string_view trigger, std::size_t row,
+std::uint64_t stableHash(std::string_view value) noexcept {
+    constexpr std::uint64_t offset = 14695981039346656037ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    std::uint64_t hash = offset;
+    for (const unsigned char byte : value) {
+        hash ^= byte;
+        hash *= prime;
+    }
+    return hash;
+}
+
+std::string makeImportId(std::string_view trigger, std::string_view replacement,
     const std::unordered_set<std::string>& existingIds) {
-    const std::size_t hash = std::hash<std::string_view>{}(trigger);
-    std::string base = "import-" + std::to_string(hash) + "-" + std::to_string(row);
+    std::string identity(trigger);
+    identity.push_back('\0');
+    identity.append(replacement);
+    const std::string base = "import-" + std::to_string(stableHash(identity));
     std::string result = base;
     std::size_t suffix = 2;
     while (existingIds.contains(result)) result = base + "-" + std::to_string(suffix++);
     return result;
 }
-
 std::unordered_map<std::string, std::size_t> headerIndex(const std::vector<std::string>& header) {
     std::unordered_map<std::string, std::size_t> result;
     for (std::size_t index = 0; index < header.size(); ++index) {
-        result[RuleStore::foldAscii(trimAscii(header[index]))] = index;
+        const std::string name = RuleStore::foldAscii(trimAscii(header[index]));
+        if (name.empty()) {
+            throw std::runtime_error("The import header contains an empty column at column " +
+                std::to_string(index + 1) + ".");
+        }
+        if (!result.emplace(name, index).second) {
+            throw std::runtime_error("Duplicate import header '" + name + "' at column " +
+                std::to_string(index + 1) + ".");
+        }
     }
     return result;
 }
-
 std::string cell(const std::vector<std::string>& row,
     const std::unordered_map<std::string, std::size_t>& header, std::string_view name) {
     const auto found = header.find(std::string(name));
@@ -195,6 +245,28 @@ void ensureImportedGroups(Json& root, const Json& imported,
     }
 }
 
+Json extraFields(const Json& item) {
+    static const std::unordered_set<std::string> known{
+        "id", "enabled", "trigger", "replacement", "group", "matchMode",
+        "caseSensitive", "activation", "fileExtensions", "pathGlobs", "languages", "description",
+    };
+    Json extra = item;
+    for (const auto& name : known) extra.erase(name);
+    return extra;
+}
+
+bool spreadsheetFormulaRisk(std::string_view value) {
+    const std::size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return false;
+    return value[first] == '=' || value[first] == '+' || value[first] == '-' || value[first] == '@';
+}
+
+std::string spreadsheetCell(std::string value, bool safe, std::size_t& riskyCells) {
+    if (!spreadsheetFormulaRisk(value)) return value;
+    ++riskyCells;
+    if (safe) value.insert(value.begin(), '\'');
+    return value;
+}
 } // namespace
 
 RuleExchangeResult RuleExchange::importDelimited(
@@ -230,34 +302,50 @@ RuleExchangeResult RuleExchange::importDelimited(
         Json imported = Json::array();
         for (std::size_t rowIndex = 1; rowIndex < rows.size(); ++rowIndex) {
             const auto& row = rows[rowIndex];
-            const std::string trigger = cell(row, header, "trigger");
-            const std::string replacement = cell(row, header, "replacement");
-            if (trigger.empty() && replacement.empty()) continue;
-            if (trigger.empty() || replacement.empty()) {
+            try {
+                const std::string trigger = cell(row, header, "trigger");
+                const std::string replacement = cell(row, header, "replacement");
+                if (trigger.empty() && replacement.empty()) continue;
+                if (trigger.empty() || replacement.empty()) {
+                    throw std::runtime_error("must contain both trigger and replacement.");
+                }
+                std::string id = cell(row, header, "id");
+                if (id.empty()) id = makeImportId(trigger, replacement, existingIds);
+                if (existingIds.contains(id)) {
+                    throw std::runtime_error("uses duplicate id '" + id + "'.");
+                }
+                existingIds.insert(id);
+
+                Json item = Json::object();
+                const std::string extraJson = trimAscii(cell(row, header, "extrajson"));
+                if (!extraJson.empty()) {
+                    item = Json::parse(extraJson);
+                    if (!item.is_object()) {
+                        throw std::runtime_error("extraJson must be a JSON object.");
+                    }
+                }
+                item["id"] = id;
+                item["enabled"] = parseBoolean(cell(row, header, "enabled"), true);
+                item["trigger"] = trigger;
+                item["replacement"] = replacement;
+                item["group"] = trimAscii(cell(row, header, "group"));
+                item["matchMode"] = trimAscii(cell(row, header, "matchmode"));
+                if (item["matchMode"].get_ref<const std::string&>().empty()) {
+                    item["matchMode"] = "wholeWord";
+                }
+                item["caseSensitive"] =
+                    parseBoolean(cell(row, header, "casesensitive"), false);
+                item["activation"] = activationJson(cell(row, header, "activation"));
+                item["fileExtensions"] = extensionsJson(cell(row, header, "fileextensions"));
+                item["pathGlobs"] = splitList(cell(row, header, "pathglobs"));
+                item["languages"] = splitList(cell(row, header, "languages"));
+                item["description"] = cell(row, header, "description");
+                imported.push_back(std::move(item));
+            } catch (const std::exception& exception) {
                 throw std::runtime_error("Import row " + std::to_string(rowIndex + 1) +
-                    " must contain both trigger and replacement.");
+                    ": " + exception.what());
             }
-            std::string id = cell(row, header, "id");
-            if (id.empty()) id = makeImportId(trigger, rowIndex + 1, existingIds);
-            if (existingIds.contains(id)) {
-                throw std::runtime_error("Import row " + std::to_string(rowIndex + 1) +
-                    " uses duplicate id '" + id + "'.");
-            }
-            existingIds.insert(id);
-            imported.push_back({
-                {"id", id},
-                {"enabled", parseBoolean(cell(row, header, "enabled"), true)},
-                {"trigger", trigger},
-                {"replacement", replacement},
-                {"group", trimAscii(cell(row, header, "group"))},
-                {"matchMode", "wholeWord"},
-                {"caseSensitive", parseBoolean(cell(row, header, "casesensitive"), false)},
-                {"activation", activationJson(cell(row, header, "activation"))},
-                {"fileExtensions", extensionsJson(cell(row, header, "fileextensions"))},
-                {"description", cell(row, header, "description")},
-            });
-        }
-        if (imported.empty()) throw std::runtime_error("The import file contains no rule rows.");
+        }        if (imported.empty()) throw std::runtime_error("The import file contains no rule rows.");
 
         if (mode == DelimitedImportMode::replace) root["items"] = Json::array();
         ensureImportedGroups(root, imported, result.warnings);
@@ -279,7 +367,8 @@ RuleExchangeResult RuleExchange::importDelimited(
 
 RuleExchangeResult RuleExchange::exportDelimited(
     std::string_view replacementsJson,
-    char delimiter) {
+    char delimiter,
+    bool spreadsheetSafe) {
     RuleExchangeResult result;
     try {
         if (delimiter != ',' && delimiter != '\t') {
@@ -290,32 +379,46 @@ RuleExchangeResult RuleExchange::exportDelimited(
             throw std::runtime_error("The replacements document has no items array.");
         }
         const std::vector<std::string> headers{
-            "id", "enabled", "trigger", "replacement", "group", "activation",
-            "caseSensitive", "fileExtensions", "description",
+            "id", "enabled", "trigger", "replacement", "group", "matchMode", "activation",
+            "caseSensitive", "fileExtensions", "pathGlobs", "languages", "description", "extraJson",
         };
         std::string output = "\xEF\xBB\xBF";
+        std::size_t riskyCells = 0;
         const auto appendRow = [&](const std::vector<std::string>& values, std::string& target) {
             for (std::size_t index = 0; index < values.size(); ++index) {
                 if (index != 0) target.push_back(delimiter);
-                target.append(quoteField(values[index], delimiter));
+                target.append(quoteField(
+                    spreadsheetCell(values[index], spreadsheetSafe, riskyCells), delimiter));
             }
             target.append("\r\n");
         };
         appendRow(headers, output);
         for (const auto& item : root["items"]) {
             if (!item.is_object()) continue;
+            const Json extra = extraFields(item);
             appendRow({
                 item.value("id", ""),
                 item.value("enabled", true) ? "true" : "false",
                 item.value("trigger", ""),
                 item.value("replacement", ""),
                 item.value("group", ""),
+                item.value("matchMode", "wholeWord"),
                 joinJsonArray(item.value("activation", Json::array())),
                 item.value("caseSensitive", false) ? "true" : "false",
                 joinJsonArray(item.value("fileExtensions", Json::array())),
+                joinJsonArray(item.value("pathGlobs", Json::array())),
+                joinJsonArray(item.value("languages", Json::array())),
                 item.value("description", ""),
+                extra.empty() ? std::string{} : extra.dump(),
             }, output);
             ++result.itemCount;
+        }
+        if (riskyCells != 0) {
+            result.warnings.push_back(spreadsheetSafe
+                ? "Prefixed " + std::to_string(riskyCells) +
+                    " spreadsheet-formula cell(s) with an apostrophe; this export is presentation-safe, not lossless."
+                : "Detected " + std::to_string(riskyCells) +
+                    " cell(s) that spreadsheet software may evaluate as formulas.");
         }
         result.ok = true;
         result.text = std::move(output);
@@ -324,5 +427,4 @@ RuleExchangeResult RuleExchange::exportDelimited(
     }
     return result;
 }
-
 } // namespace nppqr

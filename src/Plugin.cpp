@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cwctype>
 #include <filesystem>
@@ -30,7 +32,7 @@ using nppqr::RuleManagerOptions;
 using nppqr::RuleStore;
 
 constexpr wchar_t kPluginName[] = L"NppQuickReplace";
-constexpr wchar_t kPluginVersion[] = L"0.4.0-alpha";
+constexpr wchar_t kPluginVersion[] = L"0.5.0-alpha";
 constexpr int kCommandCount = 7;
 
 enum CommandIndex : int {
@@ -154,6 +156,25 @@ std::string currentFileExtension() {
     return refreshed == gExtensionCache.end() ? std::string{} : refreshed->second;
 }
 
+std::string currentFilePathUtf8() {
+    return RuleStore::foldAscii(wideToUtf8(filePathForBuffer(currentBufferId()).wstring()));
+}
+
+std::string currentLanguageName() {
+    LangType language = L_TEXT;
+    if (::SendMessageW(gNppData._nppHandle, NPPM_GETCURRENTLANGTYPE, 0,
+            reinterpret_cast<LPARAM>(&language)) == FALSE) {
+        return {};
+    }
+    const LRESULT length = ::SendMessageW(
+        gNppData._nppHandle, NPPM_GETLANGUAGENAME, static_cast<WPARAM>(language), 0);
+    if (length <= 0 || length > 1024) return {};
+    std::wstring name(static_cast<std::size_t>(length) + 1, L'\0');
+    ::SendMessageW(gNppData._nppHandle, NPPM_GETLANGUAGENAME,
+        static_cast<WPARAM>(language), reinterpret_cast<LPARAM>(name.data()));
+    name.resize(static_cast<std::size_t>(length));
+    return RuleStore::foldAscii(wideToUtf8(name));
+}
 bool isCurrentBufferPaused() {
     const UINT_PTR bufferId = currentBufferId();
     return bufferId != 0 && gPausedBuffers.contains(bufferId);
@@ -321,43 +342,147 @@ std::string normalizeEol(std::string_view text, int eolMode) {
 }
 
 
-void replaceAll(std::string& text, std::string_view marker, std::string_view value) {
+bool replaceAllBounded(
+    std::string& text,
+    std::string_view marker,
+    std::string_view value,
+    std::size_t maxSize) {
+    if (marker.empty() || text.size() > maxSize) return false;
+    std::size_t count = 0;
+    for (std::size_t position = text.find(marker); position != std::string::npos;
+         position = text.find(marker, position + marker.size())) {
+        ++count;
+    }
+    if (value.size() > marker.size()) {
+        const std::size_t growth = value.size() - marker.size();
+        if (count > (maxSize - text.size()) / growth) return false;
+    }
     std::size_t position = text.find(marker);
     while (position != std::string::npos) {
         text.replace(position, marker.size(), value);
         position = text.find(marker, position + value.size());
     }
+    return true;
 }
 
-std::string clipboardTextUtf8() {
-    if (!::OpenClipboard(gNppData._nppHandle)) return {};
+std::optional<std::string> clipboardTextUtf8(std::wstring& error) {
+    if (!::OpenClipboard(gNppData._nppHandle)) {
+        error = L"Skipped a replacement because the clipboard could not be opened.";
+        return std::nullopt;
+    }
     struct ClipboardCloser {
         ~ClipboardCloser() { ::CloseClipboard(); }
     } closer;
     HANDLE data = ::GetClipboardData(CF_UNICODETEXT);
-    if (data == nullptr) return {};
+    if (data == nullptr) {
+        error = L"Skipped a replacement because the clipboard does not contain Unicode text.";
+        return std::nullopt;
+    }
+    const SIZE_T allocationBytes = ::GlobalSize(data);
+    if (allocationBytes > (gConfig.maxExpandedBytes + 1U) * sizeof(wchar_t)) {
+        error = L"Skipped a replacement because the clipboard exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
     const auto* text = static_cast<const wchar_t*>(::GlobalLock(data));
-    if (text == nullptr) return {};
+    if (text == nullptr) {
+        error = L"Skipped a replacement because the clipboard text could not be locked.";
+        return std::nullopt;
+    }
     const std::wstring value(text);
     ::GlobalUnlock(data);
-    return wideToUtf8(value);
+    std::string result = wideToUtf8(value);
+    if (result.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because the UTF-8 clipboard text exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
+    return result;
 }
 
-std::string expandBuiltInVariables(std::string source) {
+std::optional<std::string> selectionTextUtf8(HWND editor, std::wstring& error) {
+    const LRESULT byteCount = ::SendMessageW(editor, SCI_GETSELTEXT, 0, 0);
+    if (byteCount <= 1) return std::string{};
+    if (static_cast<std::size_t>(byteCount - 1) > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because the selected text exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
+    std::string bytes(static_cast<std::size_t>(byteCount), '\0');
+    ::SendMessageW(editor, SCI_GETSELTEXT, 0, reinterpret_cast<LPARAM>(bytes.data()));
+    bytes.resize(static_cast<std::size_t>(byteCount - 1));
+    std::wstring wide;
+    if (!documentBytesToWide(editor, bytes, wide)) {
+        error = L"Skipped a replacement because the selected text could not be decoded.";
+        return std::nullopt;
+    }
+    std::string utf8 = wideToUtf8(wide);
+    if (utf8.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because the selected text exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
+    return utf8;
+}
+
+std::string makeUuidUtf8() {
+    GUID guid{};
+    if (FAILED(::CoCreateGuid(&guid))) return {};
+    wchar_t buffer[40]{};
+    ::StringFromGUID2(guid, buffer, static_cast<int>(std::size(buffer)));
+    std::wstring value(buffer);
+    if (!value.empty() && value.front() == L'{') value.erase(value.begin());
+    if (!value.empty() && value.back() == L'}') value.pop_back();
+    return wideToUtf8(value);
+}
+std::optional<std::string> expandBuiltInVariables(
+    HWND editor, std::string source, std::wstring& error) {
+    if (source.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because its template exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
+    const auto replaceVariable = [&](std::string_view marker, std::string_view value) {
+        if (replaceAllBounded(source, marker, value, gConfig.maxExpandedBytes)) return true;
+        error = L"Skipped a replacement because repeated variables exceed maxExpandedBytes.";
+        return false;
+    };
     SYSTEMTIME time{};
     ::GetLocalTime(&time);
     wchar_t date[16]{};
     wchar_t clock[16]{};
     ::swprintf_s(date, L"%04u-%02u-%02u", time.wYear, time.wMonth, time.wDay);
     ::swprintf_s(clock, L"%02u:%02u:%02u", time.wHour, time.wMinute, time.wSecond);
-    replaceAll(source, "${date}", wideToUtf8(date));
-    replaceAll(source, "${time}", wideToUtf8(clock));
+    if (!replaceVariable("${date}", wideToUtf8(date)) ||
+        !replaceVariable("${time}", wideToUtf8(clock))) {
+        return std::nullopt;
+    }
+    if (source.find("${uuid}") != std::string::npos &&
+        !replaceVariable("${uuid}", makeUuidUtf8())) {
+        return std::nullopt;
+    }
+    const Sci_Position caret = static_cast<Sci_Position>(
+        ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
+    const LRESULT line = ::SendMessageW(editor, SCI_LINEFROMPOSITION, static_cast<WPARAM>(caret), 0);
+    const LRESULT column = ::SendMessageW(editor, SCI_GETCOLUMN, static_cast<WPARAM>(caret), 0);
+    if (!replaceVariable("${line}", std::to_string(line + 1)) ||
+        !replaceVariable("${column}", std::to_string(column + 1))) {
+        return std::nullopt;
+    }
 
     const std::filesystem::path path = filePathForBuffer(currentBufferId());
-    replaceAll(source, "${filename}", wideToUtf8(path.filename().wstring()));
-    replaceAll(source, "${filepath}", wideToUtf8(path.wstring()));
+    if (!replaceVariable("${filename}", wideToUtf8(path.filename().wstring())) ||
+        !replaceVariable("${filepath}", wideToUtf8(path.wstring()))) {
+        return std::nullopt;
+    }
     if (source.find("${clipboard}") != std::string::npos) {
-        replaceAll(source, "${clipboard}", clipboardTextUtf8());
+        const auto clipboard = clipboardTextUtf8(error);
+        if (!clipboard.has_value()) return std::nullopt;
+        if (!replaceVariable("${clipboard}", *clipboard)) return std::nullopt;
+    }
+    if (source.find("${selection}") != std::string::npos) {
+        const auto selection = selectionTextUtf8(editor, error);
+        if (!selection.has_value()) return std::nullopt;
+        if (!replaceVariable("${selection}", *selection)) return std::nullopt;
+    }
+    if (source.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because expanded variables exceed maxExpandedBytes.";
+        return std::nullopt;
     }
     return source;
 }
@@ -366,22 +491,63 @@ struct ExpandedReplacement {
     std::optional<std::size_t> cursorByteOffset;
 };
 
-std::optional<ExpandedReplacement> expandReplacement(HWND editor, std::string source) {
-    source = expandBuiltInVariables(std::move(source));
-    constexpr std::string_view marker = "${cursor}";
-    const std::size_t firstMarker = source.find(marker);
-    std::string beforeMarker = firstMarker == std::string::npos ? std::string{} : source.substr(0, firstMarker);
-    std::size_t markerPosition = source.find(marker);
-    while (markerPosition != std::string::npos) {
-        source.erase(markerPosition, marker.size());
-        markerPosition = source.find(marker, markerPosition);
+std::optional<ExpandedReplacement> expandReplacement(
+    HWND editor, std::string source, std::wstring& error) {
+    const auto expanded = expandBuiltInVariables(editor, std::move(source), error);
+    if (!expanded.has_value()) return std::nullopt;
+    source = std::move(*expanded);
+    constexpr std::string_view cursorMarker = "${cursor}";
+    constexpr std::string_view tabstopPrefix = "${tabstop:";
+    std::string cleaned;
+    cleaned.reserve(source.size());
+    std::optional<std::size_t> cursorPosition;
+    std::optional<std::pair<unsigned int, std::size_t>> selectedTabstop;
+    for (std::size_t index = 0; index < source.size();) {
+        if (source.substr(index).starts_with(cursorMarker)) {
+            if (!cursorPosition.has_value()) cursorPosition = cleaned.size();
+            index += cursorMarker.size();
+            continue;
+        }
+        if (source.substr(index).starts_with(tabstopPrefix)) {
+            const std::size_t numberStart = index + tabstopPrefix.size();
+            const std::size_t close = source.find('}', numberStart);
+            if (close != std::string::npos) {
+                unsigned int number = 0;
+                const auto parsed = std::from_chars(
+                    source.data() + numberStart, source.data() + close, number);
+                if (parsed.ec == std::errc{} && parsed.ptr == source.data() + close) {
+                    if (!selectedTabstop.has_value() || number < selectedTabstop->first) {
+                        selectedTabstop = std::pair{number, cleaned.size()};
+                    }
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        cleaned.push_back(source[index++]);
     }
+    if (selectedTabstop.has_value()) cursorPosition = selectedTabstop->second;
+    source = std::move(cleaned);
+    const std::string beforeMarker = cursorPosition.has_value()
+        ? source.substr(0, *cursorPosition)
+        : std::string{};
     const int eolMode = static_cast<int>(::SendMessageW(editor, SCI_GETEOLMODE, 0, 0));
     const std::string normalized = normalizeEol(source, eolMode);
+    if (normalized.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because normalized output exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
     const std::wstring wide = normalizeNfc(utf8ToWide(normalized));
     ExpandedReplacement result;
-    if (!wideToDocumentBytes(editor, wide, result.documentBytes)) return std::nullopt;
-    if (firstMarker != std::string::npos) {
+    if (!wideToDocumentBytes(editor, wide, result.documentBytes)) {
+        error = L"Skipped a replacement that cannot be represented in the document encoding.";
+        return std::nullopt;
+    }
+    if (result.documentBytes.size() > gConfig.maxExpandedBytes) {
+        error = L"Skipped a replacement because encoded output exceeds maxExpandedBytes.";
+        return std::nullopt;
+    }
+    if (cursorPosition.has_value()) {
         const std::string beforeNormalized = normalizeEol(beforeMarker, eolMode);
         std::string beforeBytes;
         if (!wideToDocumentBytes(editor, normalizeNfc(utf8ToWide(beforeNormalized)), beforeBytes)) {
@@ -414,9 +580,10 @@ private:
 
 void applyReplacement(HWND editor, const TriggerRange& trigger,
     const ReplacementRule& rule, Sci_Position trailingDelimiterBytes) {
-    const auto replacement = expandReplacement(editor, rule.replacement);
+    std::wstring expansionError;
+    const auto replacement = expandReplacement(editor, rule.replacement, expansionError);
     if (!replacement.has_value()) {
-        logMessage(L"warning", L"Skipped a replacement that cannot be represented in the document encoding.");
+        logMessage(L"warning", expansionError.empty() ? L"Skipped an invalid replacement." : expansionError);
         return;
     }
     ScopedUndoAction undo(editor);
@@ -548,13 +715,29 @@ void processCharacterAdded(const SCNotification& notification) {
         : delimiterStartFor(editor, caret, notification.ch);
     const auto trigger = readTriggerBefore(editor, triggerEnd);
     if (!trigger.has_value()) return;
+    const std::string extension = currentFileExtension();
+    const std::string path = currentFilePathUtf8();
+    const std::string language = currentLanguageName();
     const ReplacementRule* rule = immediate
-        ? gRules.findImmediate(trigger->text, currentFileExtension())
-        : gRules.find(trigger->text, activation, currentFileExtension());
+        ? gRules.findImmediate(trigger->text, extension, path, language)
+        : gRules.find(trigger->text, activation, extension, path, language);
     if (rule == nullptr) return;
     applyReplacement(editor, *trigger, *rule, immediate ? 0 : caret - triggerEnd);
 }
 
+void processPastedText(const SCNotification& notification) {
+    if (!gConfig.processPaste || gInternalEdit || notification.text == nullptr ||
+        notification.length <= 1 ||
+        (notification.modificationType & SC_MOD_INSERTTEXT) == 0) {
+        return;
+    }
+    const unsigned char last = static_cast<unsigned char>(notification.text[notification.length - 1]);
+    if (last > 0x7FU || activationForCharacter(last) == Activation::none) return;
+    SCNotification synthetic = notification;
+    synthetic.ch = last;
+    synthetic.characterSource = SC_CHARACTERSOURCE_DIRECT_INPUT;
+    processCharacterAdded(synthetic);
+}
 void toggleEnabled() {
     gConfig.pluginEnabled = !gConfig.pluginEnabled;
     refreshMenuChecks();
@@ -577,7 +760,8 @@ void manualReplace() {
         ::SendMessageW(editor, SCI_GETCURRENTPOS, 0, 0));
     const auto trigger = readTriggerBefore(editor, caret);
     if (!trigger.has_value()) return;
-    const ReplacementRule* rule = gRules.findManual(trigger->text, currentFileExtension());
+    const ReplacementRule* rule = gRules.findManual(
+        trigger->text, currentFileExtension(), currentFilePathUtf8(), currentLanguageName());
     if (rule != nullptr) applyReplacement(editor, *trigger, *rule, 0);
 }
 
@@ -694,9 +878,13 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notification) {
         case NPPN_SHUTDOWN:
             saveEnabledState();
             gReady = false;
+            nppqr::closeRuleManager(true);
             break;
         case SCN_CHARADDED:
             processCharacterAdded(*notification);
+            break;
+        case SCN_MODIFIED:
+            processPastedText(*notification);
             break;
         default:
             break;

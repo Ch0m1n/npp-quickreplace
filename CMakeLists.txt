@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   NppQuickReplace
-  VERSION 0.4.0
+  VERSION 0.5.0
   DESCRIPTION "Fast, local text expansion for Notepad++"
   LANGUAGES CXX RC
 )
@@ -36,6 +36,8 @@ target_compile_definitions(NppQuickReplaceCore
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
 )
 
 add_library(NppQuickReplace SHARED
@@ -58,6 +60,8 @@ target_compile_definitions(NppQuickReplace
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
 )
 
 target_link_libraries(NppQuickReplace PRIVATE NppQuickReplaceCore Shell32 Comctl32 UxTheme Comdlg32 Ole32)
@@ -69,8 +73,9 @@ set_target_properties(NppQuickReplace PROPERTIES
 
 if(MSVC)
   foreach(target NppQuickReplaceCore NppQuickReplace)
-    target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /EHsc /sdl)
   endforeach()
+  target_link_options(NppQuickReplace PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
 endif()
 
 if(BUILD_TESTING)
@@ -96,9 +101,15 @@ install(FILES
   samples/config.json
   samples/replacements.json
   README.md
+  CHANGELOG.md
   LICENSE
   THIRD_PARTY_NOTICES.md
   DESTINATION NppQuickReplace
+)
+install(FILES
+  docs/architecture.md
+  docs/planning-ko.md
+  DESTINATION NppQuickReplace/docs
 )
 install(FILES
   third_party/nlohmann/LICENSE.MIT

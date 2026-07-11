@@ -30,7 +30,8 @@ public:
 
     static RuleExchangeResult exportDelimited(
         std::string_view replacementsJson,
-        char delimiter);
+        char delimiter,
+        bool spreadsheetSafe = false);
 };
 
 } // namespace nppqr

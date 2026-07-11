@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
@@ -51,6 +51,17 @@ if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 if ($Package) {
     & $cmake --build $buildDirectory --config $Configuration --target package
     if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
+    $packages = Get-ChildItem -LiteralPath $buildDirectory -Filter 'NppQuickReplace-*.zip' -File |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $packages) { throw 'The package target completed without producing a ZIP file.' }
+    $checksumLines = foreach ($packageFile in $packages) {
+        $hash = Get-FileHash -LiteralPath $packageFile.FullName -Algorithm SHA256
+        "$($hash.Hash.ToLowerInvariant())  $($packageFile.Name)"
+    }
+    $checksumPath = Join-Path $buildDirectory 'SHA256SUMS.txt'
+    Set-Content -LiteralPath $checksumPath -Value $checksumLines -Encoding utf8NoBOM
+    Write-Host "Checksums: $checksumPath"
 }
 
 Write-Host "Build complete: $buildDirectory\$Configuration\NppQuickReplace.dll"

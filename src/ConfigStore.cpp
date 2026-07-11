@@ -73,6 +73,7 @@ Json mergeConfigIntoJson(const PluginConfig& config, Json root) {
     root["skipReadOnlyDocuments"] = config.skipReadOnlyDocuments;
     root["skipMultiSelection"] = config.skipMultiSelection;
     root["maxTriggerBytes"] = config.maxTriggerBytes;
+    root["maxExpandedBytes"] = config.maxExpandedBytes;
     root["backup"]["enabled"] = config.backupEnabled;
     root["backup"]["maxFiles"] = config.maxBackupFiles;
     root["logging"]["enabled"] = config.loggingEnabled;
@@ -159,6 +160,58 @@ bool writeHandle(HANDLE file, std::string_view content, std::string& error) {
     return true;
 }
 
+bool writeUtf8FileAtomicUnlocked(
+    const std::filesystem::path& path,
+    std::string_view content,
+    std::string& error) {
+    const std::filesystem::path temporaryPath = uniqueTemporaryPath(path);
+    HANDLE file = ::CreateFileW(
+        temporaryPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = "Unable to create a temporary settings file (Windows error " +
+                std::to_string(::GetLastError()) + ").";
+        return false;
+    }
+
+    const bool wrote = writeHandle(file, content, error);
+    ::CloseHandle(file);
+    if (!wrote) {
+        ::DeleteFileW(temporaryPath.c_str());
+        return false;
+    }
+
+    if (::ReplaceFileW(
+            path.c_str(),
+            temporaryPath.c_str(),
+            nullptr,
+            REPLACEFILE_WRITE_THROUGH,
+            nullptr,
+            nullptr)) {
+        return true;
+    }
+
+    const DWORD replaceError = ::GetLastError();
+    if (::MoveFileExW(
+            temporaryPath.c_str(),
+            path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+
+    const DWORD moveError = ::GetLastError();
+    error = "Unable to atomically replace the settings file (ReplaceFile error " +
+            std::to_string(replaceError) + ", MoveFileEx error " +
+            std::to_string(moveError) + ").";
+    ::DeleteFileW(temporaryPath.c_str());
+    return false;
+}
+
 std::wstring backupFileName() {
     SYSTEMTIME time{};
     ::GetLocalTime(&time);
@@ -236,6 +289,8 @@ ConfigLoadResult ConfigStore::loadConfig(
         parsed.skipMultiSelection = root.value(
             "skipMultiSelection", parsed.skipMultiSelection);
         parsed.maxTriggerBytes = root.value("maxTriggerBytes", parsed.maxTriggerBytes);
+        parsed.maxExpandedBytes = root.value(
+            "maxExpandedBytes", parsed.maxExpandedBytes);
 
         if (const auto backup = root.find("backup"); backup != root.end() && backup->is_object()) {
             parsed.backupEnabled = backup->value("enabled", parsed.backupEnabled);
@@ -249,16 +304,17 @@ ConfigLoadResult ConfigStore::loadConfig(
         if (parsed.maxTriggerBytes < 16 || parsed.maxTriggerBytes > 4096) {
             throw std::runtime_error("maxTriggerBytes must be between 16 and 4096.");
         }
+        if (parsed.maxExpandedBytes < 4096 ||
+            parsed.maxExpandedBytes > 16U * 1024U * 1024U) {
+            throw std::runtime_error(
+                "maxExpandedBytes must be between 4096 and 16777216.");
+        }
         if (parsed.maxBackupFiles < 1 || parsed.maxBackupFiles > 100) {
             throw std::runtime_error("backup.maxFiles must be between 1 and 100.");
         }
         if (parsed.loggingLevel != "debug" && parsed.loggingLevel != "info" &&
             parsed.loggingLevel != "warning" && parsed.loggingLevel != "error") {
             throw std::runtime_error("logging.level must be debug, info, warning, or error.");
-        }
-        if (parsed.processPaste) {
-            result.warnings.push_back(
-                "processPaste is enabled, but pasted text replacement is intentionally disabled in this version.");
         }
 
         config = std::move(parsed);
@@ -316,56 +372,78 @@ bool ConfigStore::writeUtf8FileAtomic(
     std::string_view content,
     std::string& error) {
     ScopedWriteMutex lock(error);
-    if (!lock.locked()) {
+    return lock.locked() && writeUtf8FileAtomicUnlocked(path, content, error);
+}
+
+AtomicWriteResult ConfigStore::writeUtf8FileAtomicIfUnchanged(
+    const std::filesystem::path& path,
+    std::uint64_t expectedContentHash,
+    std::string_view content,
+    std::string& error) {
+    ScopedWriteMutex lock(error);
+    if (!lock.locked()) return AtomicWriteResult::failed;
+
+    std::string current;
+    if (!readUtf8File(path, current, error)) return AtomicWriteResult::failed;
+    if (contentHash(current) != expectedContentHash) {
+        error = "replacements.json changed on disk after this draft was opened.";
+        return AtomicWriteResult::conflict;
+    }
+    return writeUtf8FileAtomicUnlocked(path, content, error)
+        ? AtomicWriteResult::written
+        : AtomicWriteResult::failed;
+}
+
+std::uint64_t ConfigStore::contentHash(std::string_view content) noexcept {
+    if (content.size() >= 3 && static_cast<unsigned char>(content[0]) == 0xEFU &&
+        static_cast<unsigned char>(content[1]) == 0xBBU &&
+        static_cast<unsigned char>(content[2]) == 0xBFU) {
+        content.remove_prefix(3);
+    }
+    // Atomic writes add one final newline. Ignore that transport detail so the
+    // in-memory draft and its just-written file share the same revision hash.
+    if (!content.empty() && content.back() == '\n') {
+        content.remove_suffix(1);
+        if (!content.empty() && content.back() == '\r') content.remove_suffix(1);
+    }
+    constexpr std::uint64_t offset = 14695981039346656037ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    std::uint64_t result = offset;
+    for (const unsigned char byte : content) {
+        result ^= byte;
+        result *= prime;
+    }
+    return result;
+}
+
+bool ConfigStore::fileStamp(
+    const std::filesystem::path& path,
+    FileStamp& stamp,
+    std::string& error) {
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!::GetFileAttributesExW(
+            path.c_str(), GetFileExInfoStandard, &attributes)) {
+        const DWORD code = ::GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+            stamp = {};
+            return true;
+        }
+        error = "Unable to inspect '" + path.filename().string() +
+            "' (Windows error " + std::to_string(code) + ").";
         return false;
     }
-
-    const std::filesystem::path temporaryPath = uniqueTemporaryPath(path);
-    HANDLE file = ::CreateFileW(
-        temporaryPath.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_NEW,
-        FILE_ATTRIBUTE_TEMPORARY,
-        nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        error = "Unable to create a temporary settings file (Windows error " +
-                std::to_string(::GetLastError()) + ").";
-        return false;
-    }
-
-    const bool wrote = writeHandle(file, content, error);
-    ::CloseHandle(file);
-    if (!wrote) {
-        ::DeleteFileW(temporaryPath.c_str());
-        return false;
-    }
-
-    if (::ReplaceFileW(
-            path.c_str(),
-            temporaryPath.c_str(),
-            nullptr,
-            REPLACEFILE_WRITE_THROUGH,
-            nullptr,
-            nullptr)) {
-        return true;
-    }
-
-    const DWORD replaceError = ::GetLastError();
-    if (::MoveFileExW(
-            temporaryPath.c_str(),
-            path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        return true;
-    }
-
-    const DWORD moveError = ::GetLastError();
-    error = "Unable to atomically replace the settings file (ReplaceFile error " +
-            std::to_string(replaceError) + ", MoveFileEx error " +
-            std::to_string(moveError) + ").";
-    ::DeleteFileW(temporaryPath.c_str());
-    return false;
+    ULARGE_INTEGER size{};
+    size.HighPart = attributes.nFileSizeHigh;
+    size.LowPart = attributes.nFileSizeLow;
+    ULARGE_INTEGER write{};
+    write.HighPart = attributes.ftLastWriteTime.dwHighDateTime;
+    write.LowPart = attributes.ftLastWriteTime.dwLowDateTime;
+    stamp = {
+        .exists = true,
+        .size = size.QuadPart,
+        .lastWrite = write.QuadPart,
+    };
+    return true;
 }
 
 bool ConfigStore::backupReplacements(

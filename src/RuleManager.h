@@ -19,7 +19,7 @@ struct RuleManagerOptions {
 };
 
 void showRuleManager(const RuleManagerOptions& options);
-void closeRuleManager();
+void closeRuleManager(bool discardChanges = false);
 void handleRuleManagerDarkModeChange();
 
 } // namespace nppqr

@@ -10,6 +10,7 @@
     "maxFiles": 10
   },
   "maxTriggerBytes": 512,
+  "maxExpandedBytes": 1048576,
   "logging": {
     "enabled": false,
     "level": "warning"

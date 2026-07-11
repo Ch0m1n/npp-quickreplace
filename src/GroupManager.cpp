@@ -9,7 +9,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -23,6 +25,11 @@ using Json = nlohmann::json;
 
 constexpr wchar_t kGroupWindowClass[] = L"NppQuickReplace.GroupManager";
 constexpr wchar_t kGroupWindowTitle[] = L"NppQuickReplace · Group Manager";
+
+class GroupManagerWindow;
+HWND gGroupWindow = nullptr;
+GroupManagerWindow* gGroupManager = nullptr;
+bool gDiscardGroupChanges = false;
 
 enum GroupControlId : int {
     idGroupList = 2101,
@@ -76,6 +83,17 @@ public:
     GroupManagerWindow(HWND owner, HWND notepadHandle, HINSTANCE module, Json& document)
         : owner_(owner), notepadHandle_(notepadHandle), module_(module), document_(document) {}
 
+    void handleDarkModeChange() const {
+        if (window_ == nullptr || !::IsWindow(window_)) return;
+        ::SendMessageW(notepadHandle_, NPPM_DARKMODESUBCLASSANDTHEME,
+            static_cast<WPARAM>(NppDarkMode::dmfHandleChange),
+            reinterpret_cast<LPARAM>(window_));
+        ::SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        ::RedrawWindow(window_, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
+    }
+
     bool show() {
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
@@ -107,8 +125,10 @@ public:
             module_,
             this);
         if (window_ == nullptr) return false;
+        gGroupWindow = window_;
+        gGroupManager = this;
 
-        ::EnableWindow(owner_, FALSE);
+        if (::IsWindow(owner_)) ::EnableWindow(owner_, FALSE);
         ::ShowWindow(window_, SW_SHOW);
         ::UpdateWindow(window_);
 
@@ -125,8 +145,10 @@ public:
                 ::DispatchMessageW(&message);
             }
         }
-        ::EnableWindow(owner_, TRUE);
-        ::SetActiveWindow(owner_);
+        if (::IsWindow(owner_)) {
+            ::EnableWindow(owner_, TRUE);
+            ::SetActiveWindow(owner_);
+        }
         if (quitReceived) ::PostQuitMessage(static_cast<int>(message.wParam));
         return changed_;
     }
@@ -156,10 +178,13 @@ private:
         case WM_COMMAND: onCommand(LOWORD(wParam), HIWORD(wParam)); return 0;
         case WM_NOTIFY: return onNotify(reinterpret_cast<NMHDR*>(lParam));
         case WM_CLOSE:
-            if (confirmDiscard()) ::DestroyWindow(window_);
+            if (gDiscardGroupChanges || confirmDiscard()) ::DestroyWindow(window_);
             return 0;
         case WM_NCDESTROY:
             if (baseFont_ != nullptr) ::DeleteObject(baseFont_);
+            gGroupWindow = nullptr;
+            gGroupManager = nullptr;
+            gDiscardGroupChanges = false;
             ::SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
             window_ = nullptr;
             return 0;
@@ -347,6 +372,13 @@ private:
         if (!document_.contains("groups") || !document_["groups"].is_array()) {
             document_["groups"] = Json::array();
         }
+        std::unordered_map<std::string, std::size_t> ruleCounts;
+        if (document_.contains("items") && document_["items"].is_array()) {
+            ruleCounts.reserve(document_["items"].size());
+            for (const auto& item : document_["items"]) {
+                if (item.is_object()) ++ruleCounts[item.value("group", "")];
+            }
+        }
         loading_ = true;
         ListView_DeleteAllItems(list_);
         int selectedRow = -1;
@@ -357,7 +389,7 @@ private:
             const std::wstring state = group.value("enabled", true) ? L"On" : L"Off";
             const std::wstring wideId = utf8ToWide(id);
             const std::wstring name = utf8ToWide(group.value("name", id));
-            const std::wstring rules = std::to_wstring(ruleCount(id));
+            const std::wstring rules = std::to_wstring(ruleCounts[id]);
 
             LVITEMW item{};
             item.mask = LVIF_TEXT | LVIF_PARAM;
@@ -654,8 +686,28 @@ bool showGroupManager(
     HWND notepadHandle,
     HINSTANCE module,
     nlohmann::json& document) {
-    GroupManagerWindow manager(owner, notepadHandle, module, document);
-    return manager.show();
+    nlohmann::json workingCopy = document;
+    GroupManagerWindow manager(owner, notepadHandle, module, workingCopy);
+    if (!manager.show()) return false;
+    document = std::move(workingCopy);
+    return true;
+}
+
+bool isGroupManagerOpen() {
+    return gGroupWindow != nullptr && ::IsWindow(gGroupWindow);
+}
+
+void closeGroupManager(bool discardChanges) {
+    if (isGroupManagerOpen()) {
+        gDiscardGroupChanges = discardChanges;
+        ::SendMessageW(gGroupWindow, WM_CLOSE, 0, 0);
+    }
+}
+
+void handleGroupManagerDarkModeChange() {
+    if (gGroupManager != nullptr) {
+        gGroupManager->handleDarkModeChange();
+    }
 }
 
 } // namespace nppqr

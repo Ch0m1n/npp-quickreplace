@@ -40,6 +40,8 @@ struct ReplacementRule {
     bool wholeWord = true;
     Activation activation = Activation::space | Activation::enter | Activation::tab;
     std::vector<std::string> fileExtensions;
+    std::vector<std::string> pathGlobs;
+    std::vector<std::string> languages;
 };
 
 struct RuleLoadResult {
@@ -57,15 +59,21 @@ public:
     [[nodiscard]] const ReplacementRule* find(
         std::string_view trigger,
         Activation activation,
-        std::string_view currentExtension) const;
+        std::string_view currentExtension,
+        std::string_view currentPath = {},
+        std::string_view currentLanguage = {}) const;
 
     [[nodiscard]] const ReplacementRule* findImmediate(
         std::string_view trigger,
-        std::string_view currentExtension) const;
+        std::string_view currentExtension,
+        std::string_view currentPath = {},
+        std::string_view currentLanguage = {}) const;
 
     [[nodiscard]] const ReplacementRule* findManual(
         std::string_view trigger,
-        std::string_view currentExtension) const;
+        std::string_view currentExtension,
+        std::string_view currentPath = {},
+        std::string_view currentLanguage = {}) const;
 
     [[nodiscard]] std::size_t size() const noexcept { return rules_.size(); }
     [[nodiscard]] const std::vector<ReplacementRule>& rules() const noexcept { return rules_; }
@@ -93,11 +101,15 @@ private:
         std::string_view trigger,
         Activation activation,
         std::string_view currentExtension,
+        std::string_view currentPath,
+        std::string_view currentLanguage,
         bool manual) const;
 
-    [[nodiscard]] static bool extensionMatches(
+    [[nodiscard]] static bool filtersMatch(
         const ReplacementRule& rule,
-        std::string_view currentExtension);
+        std::string_view currentExtension,
+        std::string_view currentPath,
+        std::string_view currentLanguage);
 
     using RuleIndex = std::unordered_map<
         std::string,

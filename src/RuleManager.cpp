@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,10 @@ using Json = nlohmann::json;
 
 constexpr wchar_t kWindowClass[] = L"NppQuickReplace.RuleManager";
 constexpr wchar_t kWindowTitle[] = L"NppQuickReplace · Replacement Manager";
+constexpr UINT_PTR kExternalChangeTimer = 1;
+constexpr UINT kExternalChangePollMs = 2000;
+constexpr UINT_PTR kSearchTimer = 2;
+constexpr UINT kSearchDebounceMs = 180;
 
 enum ControlId : int {
     idSearch = 1001,
@@ -38,6 +43,7 @@ enum ControlId : int {
     idDuplicate,
     idDelete,
     idManageGroups,
+    idSetState,
     idImport,
     idExport,
     idEnabled = 1010,
@@ -51,8 +57,11 @@ enum ControlId : int {
     idCaseSensitive,
     idWholeWord,
     idExtensions,
+    idPathGlobs,
+    idLanguages,
     idReplacement,
     idDescription,
+    idPreview,
     idApplyDraft,
     idSave = 1030,
     idReload,
@@ -62,6 +71,7 @@ enum ControlId : int {
 };
 
 HWND gManagerWindow = nullptr;
+bool gDiscardManagerChanges = false;
 
 std::wstring utf8ToWide(std::string_view text) {
     if (text.empty()) return {};
@@ -150,6 +160,33 @@ std::wstring joinExtensions(const Json& item) {
     return result;
 }
 
+std::vector<std::string> parseFilterValues(std::wstring value) {
+    std::replace(value.begin(), value.end(), L';', L',');
+    std::vector<std::string> result;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t end = value.find(L',', start);
+        std::wstring entry = trimWide(value.substr(start, end - start));
+        if (!entry.empty()) result.push_back(wideToUtf8(entry));
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+std::wstring joinStringArray(const Json& item, std::string_view field) {
+    std::wstring result;
+    const auto values = item.find(std::string(field));
+    if (values == item.end() || !values->is_array()) return result;
+    for (const auto& value : *values) {
+        if (!value.is_string()) continue;
+        if (!result.empty()) result.append(L", ");
+        result.append(utf8ToWide(value.get<std::string>()));
+    }
+    return result;
+}
 bool hasActivation(const Json& item, std::string_view name) {
     const auto activation = item.find("activation");
     if (activation == item.end() || !activation->is_array()) {
@@ -174,6 +211,13 @@ std::wstring activationSummary(const Json& item) {
     return result;
 }
 
+void replaceAllWide(std::wstring& text, std::wstring_view marker, std::wstring_view value) {
+    std::size_t position = text.find(marker);
+    while (position != std::wstring::npos) {
+        text.replace(position, marker.size(), value);
+        position = text.find(marker, position + value.size());
+    }
+}
 std::string makeGuid() {
     GUID guid{};
     if (FAILED(::CoCreateGuid(&guid))) return "rule-" + std::to_string(::GetTickCount64());
@@ -185,6 +229,11 @@ std::string makeGuid() {
     return wideToUtf8(value);
 }
 
+struct CachedRuleRow {
+    std::size_t documentIndex = 0;
+    std::array<std::wstring, 5> columns;
+    std::wstring searchText;
+};
 class RuleManagerWindow {
 public:
     explicit RuleManagerWindow(RuleManagerOptions options) : options_(std::move(options)) {}
@@ -202,17 +251,19 @@ public:
 
         RECT ownerRect{};
         ::GetWindowRect(options_.notepadHandle, &ownerRect);
-        constexpr int width = 1120;
-        constexpr int height = 760;
-        const int x = ownerRect.left + std::max(20L, (ownerRect.right - ownerRect.left - width) / 2);
-        const int y = ownerRect.top + std::max(20L, (ownerRect.bottom - ownerRect.top - height) / 2);
+        int width = 1120;
+        int height = 760;
+        int x = ownerRect.left + std::max(20L, (ownerRect.right - ownerRect.left - width) / 2);
+        int y = ownerRect.top + std::max(20L, (ownerRect.bottom - ownerRect.top - height) / 2);
+        bool maximize = false;
+        loadWindowState(x, y, width, height, maximize);
         window_ = ::CreateWindowExW(
             WS_EX_CONTROLPARENT, kWindowClass, kWindowTitle,
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x, y, width, height, options_.notepadHandle, nullptr, options_.module, this);
         if (window_ == nullptr) return false;
         gManagerWindow = window_;
-        ::ShowWindow(window_, SW_SHOWNORMAL);
+        ::ShowWindow(window_, maximize ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
         ::UpdateWindow(window_);
         return true;
     }
@@ -259,14 +310,33 @@ private:
             return 0;
         }
         case WM_GETMINMAXINFO:
-            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {scale(900), scale(620)};
+            reinterpret_cast<MINMAXINFO*>(lParam)->ptMinTrackSize = {scale(900), scale(680)};
             return 0;
         case WM_COMMAND: onCommand(LOWORD(wParam), HIWORD(wParam)); return 0;
         case WM_NOTIFY: return onNotify(reinterpret_cast<NMHDR*>(lParam));
+        case WM_TIMER:
+            if (wParam == kExternalChangeTimer) checkExternalChange();
+            else if (wParam == kSearchTimer) {
+                ::KillTimer(window_, kSearchTimer);
+                refreshList();
+            }
+            return 0;
         case WM_CLOSE:
+            if (isGroupManagerOpen()) {
+                pendingClose_ = true;
+                closeGroupManager(gDiscardManagerChanges);
+                return 0;
+            }
+            if (gDiscardManagerChanges) {
+                ::DestroyWindow(window_);
+                return 0;
+            }
             if (confirmClose()) ::DestroyWindow(window_);
             return 0;
         case WM_DESTROY:
+            saveWindowState();
+            ::KillTimer(window_, kExternalChangeTimer);
+            ::KillTimer(window_, kSearchTimer);
             ::SendMessageW(options_.notepadHandle, NPPM_MODELESSDIALOG,
                 MODELESSDIALOGREMOVE, reinterpret_cast<LPARAM>(window_));
             return 0;
@@ -274,6 +344,7 @@ private:
             if (baseFont_ != nullptr) ::DeleteObject(baseFont_);
             if (headingFont_ != nullptr) ::DeleteObject(headingFont_);
             gManagerWindow = nullptr;
+            gDiscardManagerChanges = false;
             ::SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
             delete this;
             return 0;
@@ -281,6 +352,52 @@ private:
         }
     }
 
+    std::filesystem::path windowStatePath() const {
+        return options_.dataDirectory / L"manager-window.json";
+    }
+
+    void loadWindowState(int& x, int& y, int& width, int& height, bool& maximize) const {
+        std::string content;
+        std::string error;
+        if (!ConfigStore::readUtf8File(windowStatePath(), content, error)) return;
+        try {
+            const Json state = Json::parse(content);
+            width = std::clamp(state.value("width", width), 900, 3840);
+            height = std::clamp(state.value("height", height), 680, 2160);
+            x = state.value("x", x);
+            y = state.value("y", y);
+            maximize = state.value("maximized", false);
+            RECT requested{x, y, x + width, y + height};
+            const HMONITOR monitor = ::MonitorFromRect(&requested, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO info{sizeof(info)};
+            if (::GetMonitorInfoW(monitor, &info)) {
+                const int workLeft = static_cast<int>(info.rcWork.left);
+                const int workTop = static_cast<int>(info.rcWork.top);
+                const int workRight = static_cast<int>(info.rcWork.right);
+                const int workBottom = static_cast<int>(info.rcWork.bottom);
+                width = std::min(width, workRight - workLeft);
+                height = std::min(height, workBottom - workTop);
+                x = std::clamp(x, workLeft, workRight - width);
+                y = std::clamp(y, workTop, workBottom - height);
+            }
+        } catch (...) {
+            // A malformed optional UI state file must never block the manager.
+        }
+    }
+
+    void saveWindowState() const {
+        if (window_ == nullptr || !::IsWindow(window_)) return;
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        if (!::GetWindowPlacement(window_, &placement)) return;
+        const RECT& rect = placement.rcNormalPosition;
+        const Json state{
+            {"x", rect.left}, {"y", rect.top},
+            {"width", rect.right - rect.left}, {"height", rect.bottom - rect.top},
+            {"maximized", placement.showCmd == SW_SHOWMAXIMIZED},
+        };
+        std::string error;
+        ConfigStore::writeUtf8FileAtomic(windowStatePath(), state.dump(2), error);
+    }
     HWND makeControl(DWORD exStyle, const wchar_t* className, const wchar_t* text, DWORD style, int id) {
         HWND control = ::CreateWindowExW(exStyle, className, text, WS_CHILD | WS_VISIBLE | style,
             0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), options_.module, nullptr);
@@ -312,11 +429,11 @@ private:
             WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, idGroupFilter);
 
         list_ = makeControl(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-            WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS, idRuleList);
+            WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA, idRuleList);
         ListView_SetExtendedListViewStyle(list_,
             LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
         ::SetWindowTheme(list_, L"Explorer", nullptr);
-        addListColumn(0, L"State", 64);
+        addListColumn(0, L"Effective state", 96);
         addListColumn(1, L"Trigger", 132);
         addListColumn(2, L"Replacement", 230);
         addListColumn(3, L"Group", 112);
@@ -325,7 +442,8 @@ private:
         add_ = makeButton(L"Add rule", idAdd);
         duplicate_ = makeButton(L"Duplicate", idDuplicate);
         delete_ = makeButton(L"Delete", idDelete);
-        manageGroups_ = makeButton(L"Groups…", idManageGroups);
+        manageGroups_ = makeButton(L"&Groups…", idManageGroups);
+        setState_ = makeButton(L"Set &state…", idSetState);
 
         detailsTitle_ = makeLabel(L"Rule details");
         detailsHint_ = makeLabel(L"Changes stay in the draft until you save the document.");
@@ -350,7 +468,16 @@ private:
             WS_TABSTOP | ES_AUTOHSCROLL, idExtensions);
         ::SendMessageW(extensions_, EM_SETCUEBANNER, TRUE,
             reinterpret_cast<LPARAM>(L"All files, or .txt, .md, .xml"));
-        replacementLabel_ = makeLabel(L"Replacement text");
+        pathGlobsLabel_ = makeLabel(L"Path globs");
+        pathGlobs_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
+            WS_TABSTOP | ES_AUTOHSCROLL, idPathGlobs);
+        ::SendMessageW(pathGlobs_, EM_SETCUEBANNER, TRUE,
+            reinterpret_cast<LPARAM>(L"Example: */docs/*, C:/work/*.md"));
+        languagesLabel_ = makeLabel(L"Languages");
+        languages_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
+            WS_TABSTOP | ES_AUTOHSCROLL, idLanguages);
+        ::SendMessageW(languages_, EM_SETCUEBANNER, TRUE,
+            reinterpret_cast<LPARAM>(L"Example: Python, Markdown"));        replacementLabel_ = makeLabel(L"Replacement text");
         replacement_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
             idReplacement);
@@ -358,7 +485,8 @@ private:
         description_ = makeControl(WS_EX_CLIENTEDGE, WC_EDITW, L"",
             WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, idDescription);
         detailStatus_ = makeLabel(L"Select a rule to edit it.");
-        applyDraft_ = makeButton(L"Apply to draft", idApplyDraft);
+        preview_ = makeButton(L"&Preview…", idPreview);
+        applyDraft_ = makeButton(L"&Apply to draft", idApplyDraft);
 
         divider_ = makeControl(0, WC_STATICW, L"", SS_ETCHEDHORZ, 0);
         save_ = makeButton(L"Save changes", idSave, BS_DEFPUSHBUTTON);
@@ -380,6 +508,7 @@ private:
             MODELESSDIALOGADD, reinterpret_cast<LPARAM>(window_));
         ::SendMessageW(options_.notepadHandle, NPPM_DARKMODESUBCLASSANDTHEME,
             static_cast<WPARAM>(NppDarkMode::dmfInit), reinterpret_cast<LPARAM>(window_));
+        ::SetTimer(window_, kExternalChangeTimer, kExternalChangePollMs, nullptr);
         return true;
     }
 
@@ -427,10 +556,11 @@ private:
         const int listY = filterY + scale(40);
         place(list_, margin, listY, leftWidth, std::max(scale(160), statusY - listY - scale(4)));
         place(listStatus_, margin, statusY, leftWidth, scale(20));
-        place(add_, margin, actionY, scale(96), scale(30));
-        place(duplicate_, margin + scale(104), actionY, scale(92), scale(30));
-        place(delete_, margin + scale(204), actionY, scale(82), scale(30));
-        place(manageGroups_, margin + scale(294), actionY, scale(94), scale(30));
+        place(add_, margin, actionY, scale(82), scale(30));
+        place(duplicate_, margin + scale(90), actionY, scale(82), scale(30));
+        place(delete_, margin + scale(180), actionY, scale(72), scale(30));
+        place(manageGroups_, margin + scale(260), actionY, scale(82), scale(30));
+        place(setState_, margin + scale(350), actionY, scale(92), scale(30));
 
         place(detailsTitle_, rightX, margin, rightWidth, scale(26));
         place(detailsHint_, rightX, margin + scale(28), rightWidth, scale(20));
@@ -456,7 +586,12 @@ private:
         const int extensionsY = checkY + scale(58);
         place(extensionsLabel_, rightX, extensionsY, rightWidth, scale(18));
         place(extensions_, rightX, extensionsY + scale(20), rightWidth, row);
-        const int replacementY = extensionsY + scale(58);
+        const int filtersY = extensionsY + scale(58);
+        place(pathGlobsLabel_, rightX, filtersY, half, scale(18));
+        place(languagesLabel_, rightX + half + scale(12), filtersY, half, scale(18));
+        place(pathGlobs_, rightX, filtersY + scale(20), half, row);
+        place(languages_, rightX + half + scale(12), filtersY + scale(20), half, row);
+        const int replacementY = filtersY + scale(58);
         place(replacementLabel_, rightX, replacementY, rightWidth, scale(18));
         const int fixedBelow = scale(18 + 66 + 22 + 32 + 28);
         const int replacementHeight = std::max(scale(100),
@@ -466,7 +601,8 @@ private:
         place(descriptionLabel_, rightX, descriptionY, rightWidth, scale(18));
         place(description_, rightX, descriptionY + scale(20), rightWidth, scale(58));
         const int detailBottomY = descriptionY + scale(82);
-        place(detailStatus_, rightX, detailBottomY, rightWidth - scale(120), scale(28));
+        place(detailStatus_, rightX, detailBottomY, rightWidth - scale(230), scale(28));
+        place(preview_, rightX + rightWidth - scale(222), detailBottomY, scale(100), scale(30));
         place(applyDraft_, rightX + rightWidth - scale(112), detailBottomY, scale(112), scale(30));
 
         place(divider_, margin, contentBottom + scale(8), width - margin * 2, scale(2));
@@ -480,10 +616,10 @@ private:
         place(close_, width - margin - scale(90), footerY, scale(90), scale(32));
         RECT listClient{};
         ::GetClientRect(list_, &listClient);
-        const int fixedColumns = scale(64 + 132 + 112 + 150);
+        const int fixedColumns = scale(96 + 132 + 112 + 150);
         const int scrollbar = ::GetSystemMetricsForDpi(SM_CXVSCROLL, dpi_);
 
-        ListView_SetColumnWidth(list_, 0, scale(64));
+        ListView_SetColumnWidth(list_, 0, scale(96));
         ListView_SetColumnWidth(list_, 1, scale(132));
         ListView_SetColumnWidth(list_, 2,
             std::max(scale(160),
@@ -524,6 +660,13 @@ private:
             const RuleLoadResult validation = validator.loadFromText(parsed.dump());
             if (!validation.ok) throw std::runtime_error(validation.error);
             document_ = std::move(parsed);
+            loadedContentHash_ = ConfigStore::contentHash(content);
+            std::string stampError;
+            if (!ConfigStore::fileStamp(options_.replacementsPath, loadedFileStamp_, stampError)) {
+                loadedFileStamp_ = {};
+            }
+            externalChangeDetected_ = false;
+            setText(subtitle_, L"Search, edit, validate, and save without touching raw JSON.");
             dirty_ = false;
             detailsDirty_ = false;
             selectedDocumentIndex_.reset();
@@ -592,8 +735,7 @@ private:
     void refreshList() {
         if (list_ == nullptr || !document_.contains("items") || !document_["items"].is_array()) return;
         loading_ = true;
-        ListView_DeleteAllItems(list_);
-        visibleIndices_.clear();
+        visibleRows_.clear();
         const std::wstring query = lowerWide(windowText(search_));
         const LRESULT selection = ::SendMessageW(groupFilter_, CB_GETCURSEL, 0, 0);
         const std::string groupFilter = selection >= 0 &&
@@ -601,91 +743,81 @@ private:
             ? filterGroups_[static_cast<std::size_t>(selection)]
             : std::string{};
 
+        std::unordered_map<std::string, bool> groupStates;
+        if (document_.contains("groups") && document_["groups"].is_array()) {
+            groupStates.reserve(document_["groups"].size());
+            for (const auto& group : document_["groups"]) {
+                if (group.is_object()) {
+                    groupStates[group.value("id", "")] = group.value("enabled", true);
+                }
+            }
+        }
+
         const Json& items = document_["items"];
+        visibleRows_.reserve(items.size());
         for (std::size_t index = 0; index < items.size(); ++index) {
             const Json& item = items[index];
             const std::string group = item.value("group", "");
             if (!groupFilter.empty() && group != groupFilter) continue;
-            std::wstring haystack = utf8ToWide(item.value("trigger", "")) + L"\n" +
-                utf8ToWide(item.value("replacement", "")) + L"\n" +
-                utf8ToWide(group) + L"\n" + utf8ToWide(item.value("description", ""));
-            if (!query.empty() && lowerWide(std::move(haystack)).find(query) == std::wstring::npos) continue;
-            visibleIndices_.push_back(index);
-        }
-        sortVisibleIndices();
 
-        int row = 0;
-        for (const std::size_t index : visibleIndices_) {
-            const Json& item = items[index];
-            const std::wstring state = item.value("enabled", true) ? L"On" : L"Off";
-            const std::wstring trigger = utf8ToWide(item.value("trigger", ""));
-            const std::wstring replacement = oneLine(utf8ToWide(item.value("replacement", "")));
-            const std::wstring group = utf8ToWide(item.value("group", ""));
-            const std::wstring activation = activationSummary(item);
-            LVITEMW listItem{};
-            listItem.mask = LVIF_TEXT | LVIF_PARAM;
-            listItem.iItem = row;
-            listItem.pszText = const_cast<wchar_t*>(state.c_str());
-            listItem.lParam = static_cast<LPARAM>(index);
-            ListView_InsertItem(list_, &listItem);
-            setListText(row, 1, trigger);
-            setListText(row, 2, replacement);
-            setListText(row, 3, group.empty() ? L"—" : group);
-            setListText(row, 4, activation);
-            ++row;
+            CachedRuleRow row;
+            row.documentIndex = index;
+            const auto groupState = groupStates.find(group);
+            if (!item.value("enabled", true)) row.columns[0] = L"Rule off";
+            else if (!group.empty() && groupState == groupStates.end()) row.columns[0] = L"Missing group";
+            else if (groupState != groupStates.end() && !groupState->second) row.columns[0] = L"Group off";
+            else row.columns[0] = L"On";
+            row.columns[1] = utf8ToWide(item.value("trigger", ""));
+            const std::wstring fullReplacement = utf8ToWide(item.value("replacement", ""));
+            row.columns[2] = oneLine(fullReplacement);
+            row.columns[3] = group.empty() ? L"—" : utf8ToWide(group);
+            row.columns[4] = activationSummary(item);
+            row.searchText = lowerWide(
+                row.columns[1] + L"\n" + fullReplacement + L"\n" + row.columns[3] + L"\n" +
+                joinStringArray(item, "pathGlobs") + L"\n" +
+                joinStringArray(item, "languages") + L"\n" +
+                utf8ToWide(item.value("description", "")));
+            if (!query.empty() && row.searchText.find(query) == std::wstring::npos) continue;
+            visibleRows_.push_back(std::move(row));
         }
-        setText(listStatus_, std::to_wstring(visibleIndices_.size()) + L" of " +
+        sortVisibleRows();
+        ListView_SetItemCountEx(list_, static_cast<int>(visibleRows_.size()),
+            LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        ::InvalidateRect(list_, nullptr, FALSE);
+        setText(listStatus_, std::to_wstring(visibleRows_.size()) + L" of " +
             std::to_wstring(items.size()) + L" rules shown");
         loading_ = false;
         if (selectedDocumentIndex_.has_value()) selectDocumentIndex(*selectedDocumentIndex_);
     }
 
-    void sortVisibleIndices() {
-        const Json& items = document_["items"];
-        const auto textFor = [&](std::size_t index) {
-            const Json& item = items[index];
-            switch (sortColumn_) {
-            case 0: return std::wstring(item.value("enabled", true) ? L"1" : L"0");
-            case 1: return lowerWide(utf8ToWide(item.value("trigger", "")));
-            case 2: return lowerWide(utf8ToWide(item.value("replacement", "")));
-            case 3: return lowerWide(utf8ToWide(item.value("group", "")));
-            default: return lowerWide(activationSummary(item));
-            }
-        };
-        std::sort(visibleIndices_.begin(), visibleIndices_.end(), [&](std::size_t left, std::size_t right) {
-            const std::wstring leftText = textFor(left);
-            const std::wstring rightText = textFor(right);
+    void sortVisibleRows() {
+        const std::size_t column = static_cast<std::size_t>(std::clamp(sortColumn_, 0, 4));
+        std::sort(visibleRows_.begin(), visibleRows_.end(), [&](const auto& left, const auto& right) {
+            const std::wstring& leftText = left.columns[column];
+            const std::wstring& rightText = right.columns[column];
             const int comparison = ::CompareStringOrdinal(
                 leftText.c_str(), static_cast<int>(leftText.size()),
                 rightText.c_str(), static_cast<int>(rightText.size()), TRUE);
+            if (comparison == CSTR_EQUAL) return left.documentIndex < right.documentIndex;
             return sortAscending_ ? comparison == CSTR_LESS_THAN : comparison == CSTR_GREATER_THAN;
         });
     }
 
-    void setListText(int row, int column, const std::wstring& text) {
-        ListView_SetItemText(list_, row, column, const_cast<wchar_t*>(text.c_str()));
-    }
-
     std::optional<std::size_t> documentIndexForRow(int row) const {
-        if (row < 0) return std::nullopt;
-        LVITEMW item{};
-        item.mask = LVIF_PARAM;
-        item.iItem = row;
-        if (!ListView_GetItem(list_, &item)) return std::nullopt;
-        return static_cast<std::size_t>(item.lParam);
+        if (row < 0 || static_cast<std::size_t>(row) >= visibleRows_.size()) return std::nullopt;
+        return visibleRows_[static_cast<std::size_t>(row)].documentIndex;
     }
 
     void selectDocumentIndex(std::size_t documentIndex) {
-        for (int row = 0; row < ListView_GetItemCount(list_); ++row) {
-            if (documentIndexForRow(row) == documentIndex) {
-                ListView_SetItemState(list_, row, LVIS_SELECTED | LVIS_FOCUSED,
+        for (std::size_t row = 0; row < visibleRows_.size(); ++row) {
+            if (visibleRows_[row].documentIndex == documentIndex) {
+                ListView_SetItemState(list_, static_cast<int>(row), LVIS_SELECTED | LVIS_FOCUSED,
                     LVIS_SELECTED | LVIS_FOCUSED);
-                ListView_EnsureVisible(list_, row, FALSE);
+                ListView_EnsureVisible(list_, static_cast<int>(row), FALSE);
                 return;
             }
         }
     }
-
     void loadDetails(std::size_t index) {
         if (!document_.contains("items") || index >= document_["items"].size()) {
             selectedDocumentIndex_.reset();
@@ -706,6 +838,8 @@ private:
         setCheck(caseSensitive_, item.value("caseSensitive", false));
         setCheck(wholeWord_, true);
         setText(extensions_, joinExtensions(item));
+        setText(pathGlobs_, joinStringArray(item, "pathGlobs"));
+        setText(languages_, joinStringArray(item, "languages"));
         setText(replacement_, utf8ToWide(item.value("replacement", "")));
         setText(description_, utf8ToWide(item.value("description", "")));
         loading_ = false;
@@ -723,13 +857,15 @@ private:
     }
 
     void setDetailsEnabled(bool enabled) {
-        const std::array<HWND, 13> editable{{enabled_, trigger_, group_, space_, enter_, tab_,
-            punctuation_, immediate_, caseSensitive_, extensions_, replacement_, description_, applyDraft_}};
+        const std::array<HWND, 16> editable{{enabled_, trigger_, group_, space_, enter_, tab_,
+            punctuation_, immediate_, caseSensitive_, extensions_, pathGlobs_, languages_,
+            replacement_, description_, preview_, applyDraft_}};
         for (HWND control : editable) ::EnableWindow(control, enabled);
         ::EnableWindow(wholeWord_, FALSE);
         if (!enabled) {
             loading_ = true;
-            for (HWND control : {trigger_, group_, extensions_, replacement_, description_}) setText(control, L"");
+            for (HWND control : {trigger_, group_, extensions_, pathGlobs_, languages_,
+                    replacement_, description_}) setText(control, L"");
             for (HWND control : {enabled_, space_, enter_, tab_, punctuation_, immediate_,
                     caseSensitive_, wholeWord_}) setCheck(control, false);
             loading_ = false;
@@ -791,6 +927,8 @@ private:
         addActivation(immediate_, "immediate");
         item["activation"] = std::move(activation);
         item["fileExtensions"] = parseExtensions(windowText(extensions_));
+        item["pathGlobs"] = parseFilterValues(windowText(pathGlobs_));
+        item["languages"] = parseFilterValues(windowText(languages_));
 
         RuleStore validator;
         const RuleLoadResult validation = validator.loadFromText(document_.dump());
@@ -842,10 +980,33 @@ private:
                 utf8ToWide(error), MB_ICONERROR);
             return false;
         }
-        if (!ConfigStore::writeUtf8FileAtomic(options_.replacementsPath, document_.dump(2), error)) {
+        const std::string serialized = document_.dump(2);
+        const AtomicWriteResult writeResult = ConfigStore::writeUtf8FileAtomicIfUnchanged(
+            options_.replacementsPath, loadedContentHash_, serialized, error);
+        if (writeResult == AtomicWriteResult::conflict) {
+            externalChangeDetected_ = true;
+            const int choice = ::MessageBoxW(window_,
+                L"replacements.json changed outside this manager.\n\n"
+                L"Yes: reload the newer file and discard this draft\n"
+                L"No: save this draft as a separate JSON file\n"
+                L"Cancel: keep editing without saving",
+                kWindowTitle, MB_YESNOCANCEL | MB_ICONWARNING);
+            if (choice == IDYES) return loadDocument(true);
+            if (choice == IDNO) return saveDraftCopy(serialized);
+            setDetailStatus(L"Save cancelled · the external file was not overwritten.");
+            return false;
+        }
+        if (writeResult == AtomicWriteResult::failed) {
             showMessage(L"The rules could not be saved.\n\n" + utf8ToWide(error), MB_ICONERROR);
             return false;
         }
+        loadedContentHash_ = ConfigStore::contentHash(serialized);
+        std::string stampError;
+        if (!ConfigStore::fileStamp(options_.replacementsPath, loadedFileStamp_, stampError)) {
+            loadedFileStamp_ = {};
+        }
+        externalChangeDetected_ = false;
+        setText(subtitle_, L"Search, edit, validate, and save without touching raw JSON.");
         dirty_ = false;
         detailsDirty_ = false;
         updateWindowTitle();
@@ -860,6 +1021,46 @@ private:
         return true;
     }
 
+    bool saveDraftCopy(std::string_view serialized) {
+        wchar_t path[32768]{};
+        const std::filesystem::path suggested =
+            options_.replacementsPath.parent_path() / L"replacements.draft.json";
+        wcsncpy_s(path, suggested.c_str(), _TRUNCATE);
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = window_;
+        dialog.lpstrFilter = L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0\0";
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+        dialog.lpstrDefExt = L"json";
+        dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
+            OFN_DONTADDTORECENT | OFN_EXPLORER;
+        if (!::GetSaveFileNameW(&dialog)) return false;
+        std::string error;
+        if (!ConfigStore::writeUtf8FileAtomic(path, serialized, error)) {
+            showMessage(L"The draft copy could not be saved.\n\n" + utf8ToWide(error), MB_ICONERROR);
+            return false;
+        }
+        setDetailStatus(L"Draft copy saved · the externally changed file was preserved.");
+        return true;
+    }
+
+    void checkExternalChange() {
+        FileStamp current{};
+        std::string error;
+        if (!ConfigStore::fileStamp(options_.replacementsPath, current, error)) return;
+        if (current == loadedFileStamp_) return;
+        loadedFileStamp_ = current;
+        std::string content;
+        if (!ConfigStore::readUtf8File(options_.replacementsPath, content, error)) return;
+        if (ConfigStore::contentHash(content) == loadedContentHash_) return;
+        if (!externalChangeDetected_) {
+            externalChangeDetected_ = true;
+            setText(subtitle_, L"Warning: replacements.json changed outside this window.");
+            setDetailStatus(
+                L"Warning · replacements.json changed outside this window. Reload or save a draft copy.");
+        }
+    }
     void addRule() {
         if (!commitDetails(true, false)) return;
         clearFilters();
@@ -868,7 +1069,8 @@ private:
             {"trigger", uniqueTrigger("new-trigger")}, {"replacement", "New replacement"},
             {"group", ""}, {"matchMode", "wholeWord"}, {"caseSensitive", false},
             {"activation", Json::array({"space", "enter", "tab"})},
-            {"fileExtensions", Json::array()}, {"description", ""},
+            {"fileExtensions", Json::array()}, {"pathGlobs", Json::array()},
+            {"languages", Json::array()}, {"description", ""},
         });
         const std::size_t index = document_["items"].size() - 1;
         dirty_ = true;
@@ -937,6 +1139,62 @@ private:
         setDetailsEnabled(false);
     }
 
+    void setSelectedState() {
+        if (!commitDetails(true, false)) return;
+        std::vector<std::size_t> indices;
+        int row = -1;
+        while ((row = ListView_GetNextItem(list_, row, LVNI_SELECTED)) >= 0) {
+            if (const auto index = documentIndexForRow(row); index.has_value()) indices.push_back(*index);
+        }
+        if (indices.empty()) {
+            setDetailStatus(L"Select one or more rules before changing their state.");
+            return;
+        }
+        const int choice = ::MessageBoxW(window_,
+            L"Change the selected rules?\n\nYes: enable\nNo: disable\nCancel: leave unchanged",
+            kWindowTitle, MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) return;
+        const bool enabled = choice == IDYES;
+        for (const std::size_t index : indices) document_["items"][index]["enabled"] = enabled;
+        dirty_ = true;
+        updateWindowTitle();
+        refreshList();
+        setDetailStatus(std::to_wstring(indices.size()) +
+            (enabled ? L" selected rule(s) enabled in the draft." :
+                       L" selected rule(s) disabled in the draft."));
+    }
+
+    void previewCurrentRule() {
+        if (!selectedDocumentIndex_.has_value()) return;
+        std::wstring preview = windowText(replacement_);
+        replaceAllWide(preview, L"${cursor}", L"│");
+        replaceAllWide(preview, L"${date}", L"[current date]");
+        replaceAllWide(preview, L"${time}", L"[current time]");
+        replaceAllWide(preview, L"${filename}", L"[current filename]");
+        replaceAllWide(preview, L"${filepath}", L"[current file path]");
+        replaceAllWide(preview, L"${clipboard}", L"[clipboard text]");
+        replaceAllWide(preview, L"${selection}", L"[selected text]");
+        replaceAllWide(preview, L"${uuid}", L"[new UUID]");
+        replaceAllWide(preview, L"${line}", L"[line number]");
+        replaceAllWide(preview, L"${column}", L"[column number]");
+        replaceAllWide(preview, L"${tabstop:0}", L"│");
+        replaceAllWide(preview, L"${tabstop:1}", L"│");
+        replaceAllWide(preview, L"${tabstop:2}", L"│");
+        replaceAllWide(preview, L"${tabstop:3}", L"│");
+        replaceAllWide(preview, L"${tabstop:4}", L"│");
+        replaceAllWide(preview, L"${tabstop:5}", L"│");
+        replaceAllWide(preview, L"${tabstop:6}", L"│");
+        replaceAllWide(preview, L"${tabstop:7}", L"│");
+        replaceAllWide(preview, L"${tabstop:8}", L"│");
+        replaceAllWide(preview, L"${tabstop:9}", L"│");
+        if (preview.size() > 4000) {
+            preview.resize(3999);
+            preview.push_back(L'…');
+        }
+        ::MessageBoxW(window_,
+            (L"Preview (dynamic values are shown in brackets)\n\n" + preview).c_str(),
+            L"NppQuickReplace · Rule Preview", MB_OK | MB_ICONINFORMATION);
+    }
     void clearFilters() {
         loading_ = true;
         setText(search_, L"");
@@ -954,24 +1212,29 @@ private:
     void manageGroups() {
         if (!commitDetails(true, false)) return;
         const auto selected = selectedDocumentIndex_;
-        if (!showGroupManager(
-                window_, options_.notepadHandle, options_.module, document_)) {
-            return;
+        const bool changed = showGroupManager(
+            window_, options_.notepadHandle, options_.module, document_);
+        if (changed) {
+            dirty_ = true;
+            detailsDirty_ = false;
+            populateGroupFilter();
+            populateGroupEditor();
+            refreshList();
+            if (selected.has_value() && *selected < document_["items"].size()) {
+                loadDetails(*selected);
+                selectDocumentIndex(*selected);
+            } else {
+                selectedDocumentIndex_.reset();
+                setDetailsEnabled(false);
+            }
+            updateWindowTitle();
+            setDetailStatus(
+                L"Group changes applied to the draft. Save changes to write the file.");
         }
-        dirty_ = true;
-        detailsDirty_ = false;
-        populateGroupFilter();
-        populateGroupEditor();
-        refreshList();
-        if (selected.has_value() && *selected < document_["items"].size()) {
-            loadDetails(*selected);
-            selectDocumentIndex(*selected);
-        } else {
-            selectedDocumentIndex_.reset();
-            setDetailsEnabled(false);
+        if (pendingClose_) {
+            pendingClose_ = false;
+            ::PostMessageW(window_, WM_CLOSE, 0, 0);
         }
-        updateWindowTitle();
-        setDetailStatus(L"Group changes applied to the draft. Save changes to write the file.");
     }
 
     void importRules() {
@@ -1077,12 +1340,29 @@ private:
             extension = L".csv";
         }
         const char delimiter = extension == L".tsv" ? '\t' : ',';
-        const RuleExchangeResult exported =
+        RuleExchangeResult exported =
             RuleExchange::exportDelimited(document_.dump(), delimiter);
         if (!exported.ok) {
             showMessage(L"The rules could not be exported.\n\n" +
                 utf8ToWide(exported.error), MB_ICONERROR);
             return;
+        }
+        if (!exported.warnings.empty()) {
+            const int choice = ::MessageBoxW(window_,
+                L"Some cells begin with =, +, -, or @ and may run as formulas in spreadsheet software.\n\n"
+                L"Yes: prefix risky cells with an apostrophe (safer for spreadsheets)\n"
+                L"No: keep the exact original text (lossless)\n"
+                L"Cancel: do not export",
+                kWindowTitle, MB_YESNOCANCEL | MB_ICONWARNING);
+            if (choice == IDCANCEL) return;
+            if (choice == IDYES) {
+                exported = RuleExchange::exportDelimited(document_.dump(), delimiter, true);
+                if (!exported.ok) {
+                    showMessage(L"The spreadsheet-safe export could not be created.\n\n" +
+                        utf8ToWide(exported.error), MB_ICONERROR);
+                    return;
+                }
+            }
         }
 
         std::string error;
@@ -1156,7 +1436,9 @@ private:
     void onCommand(int id, int notification) {
         if (loading_) return;
         if (id == idSearch && notification == EN_CHANGE) {
-            refreshList();
+            ::KillTimer(window_, kSearchTimer);
+            ::SetTimer(window_, kSearchTimer, kSearchDebounceMs, nullptr);
+            setText(listStatus_, L"Filtering…");
             return;
         }
         if (id == idGroupFilter && notification == CBN_SELCHANGE) {
@@ -1164,7 +1446,8 @@ private:
             return;
         }
         const bool textChanged = (id == idTrigger || id == idExtensions ||
-            id == idReplacement || id == idDescription) && notification == EN_CHANGE;
+            id == idPathGlobs || id == idLanguages || id == idReplacement ||
+            id == idDescription) && notification == EN_CHANGE;
         const bool groupChanged = id == idGroup &&
             (notification == CBN_EDITCHANGE || notification == CBN_SELCHANGE);
         if (textChanged || groupChanged) {
@@ -1187,6 +1470,8 @@ private:
         case idDuplicate: duplicateRule(); break;
         case idDelete: deleteSelectedRules(); break;
         case idManageGroups: manageGroups(); break;
+        case idSetState: setSelectedState(); break;
+        case idPreview: previewCurrentRule(); break;
         case idApplyDraft: commitDetails(true, true); break;
         case idSave: saveDocument(); break;
         case idReload: reloadFromDisk(); break;
@@ -1201,6 +1486,20 @@ private:
 
     LRESULT onNotify(NMHDR* header) {
         if (header == nullptr || header->hwndFrom != list_) return 0;
+        if (header->code == LVN_GETDISPINFOW) {
+            auto* display = reinterpret_cast<NMLVDISPINFOW*>(header);
+            const int row = display->item.iItem;
+            const int column = display->item.iSubItem;
+            if ((display->item.mask & LVIF_TEXT) != 0 && display->item.pszText != nullptr &&
+                row >= 0 && static_cast<std::size_t>(row) < visibleRows_.size() &&
+                column >= 0 && column < 5) {
+                const std::wstring& value =
+                    visibleRows_[static_cast<std::size_t>(row)].columns[static_cast<std::size_t>(column)];
+                wcsncpy_s(display->item.pszText,
+                    static_cast<std::size_t>(display->item.cchTextMax), value.c_str(), _TRUNCATE);
+            }
+            return 0;
+        }
         if (header->code == LVN_ITEMCHANGING && !loading_ && detailsDirty_) {
             const auto* change = reinterpret_cast<NMLISTVIEW*>(header);
             const bool becomingSelected = (change->uChanged & LVIF_STATE) != 0 &&
@@ -1256,12 +1555,16 @@ private:
     HFONT headingFont_ = nullptr;
     std::vector<HWND> controls_;
     Json document_ = Json{{"version", 1}, {"groups", Json::array()}, {"items", Json::array()}};
-    std::vector<std::size_t> visibleIndices_;
+    std::vector<CachedRuleRow> visibleRows_;
     std::vector<std::string> filterGroups_;
     std::optional<std::size_t> selectedDocumentIndex_;
     bool dirty_ = false;
     bool detailsDirty_ = false;
     bool loading_ = false;
+    bool pendingClose_ = false;
+    bool externalChangeDetected_ = false;
+    std::uint64_t loadedContentHash_ = 0;
+    FileStamp loadedFileStamp_{};
     int sortColumn_ = 1;
     bool sortAscending_ = true;
 
@@ -1277,6 +1580,7 @@ private:
     HWND duplicate_ = nullptr;
     HWND delete_ = nullptr;
     HWND manageGroups_ = nullptr;
+    HWND setState_ = nullptr;
     HWND detailsTitle_ = nullptr;
     HWND detailsHint_ = nullptr;
     HWND enabled_ = nullptr;
@@ -1294,11 +1598,16 @@ private:
     HWND wholeWord_ = nullptr;
     HWND extensionsLabel_ = nullptr;
     HWND extensions_ = nullptr;
+    HWND pathGlobsLabel_ = nullptr;
+    HWND pathGlobs_ = nullptr;
+    HWND languagesLabel_ = nullptr;
+    HWND languages_ = nullptr;
     HWND replacementLabel_ = nullptr;
     HWND replacement_ = nullptr;
     HWND descriptionLabel_ = nullptr;
     HWND description_ = nullptr;
     HWND detailStatus_ = nullptr;
+    HWND preview_ = nullptr;
     HWND applyDraft_ = nullptr;
     HWND divider_ = nullptr;
     HWND save_ = nullptr;
@@ -1328,15 +1637,20 @@ void showRuleManager(const RuleManagerOptions& options) {
     }
 }
 
-void closeRuleManager() {
-    if (gManagerWindow != nullptr) ::SendMessageW(gManagerWindow, WM_CLOSE, 0, 0);
+void closeRuleManager(bool discardChanges) {
+    if (gManagerWindow != nullptr) {
+        gDiscardManagerChanges = discardChanges;
+        ::SendMessageW(gManagerWindow, WM_CLOSE, 0, 0);
+    }
 }
 
 void handleRuleManagerDarkModeChange() {
-    if (gManagerWindow == nullptr) return;
-    auto* manager = reinterpret_cast<RuleManagerWindow*>(
-        ::GetWindowLongPtrW(gManagerWindow, GWLP_USERDATA));
-    if (manager != nullptr) manager->handleDarkModeChange();
+    if (gManagerWindow != nullptr) {
+        auto* manager = reinterpret_cast<RuleManagerWindow*>(
+            ::GetWindowLongPtrW(gManagerWindow, GWLP_USERDATA));
+        if (manager != nullptr) manager->handleDarkModeChange();
+    }
+    handleGroupManagerDarkModeChange();
 }
 
 } // namespace nppqr

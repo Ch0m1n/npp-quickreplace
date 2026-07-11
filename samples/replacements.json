@@ -28,6 +28,8 @@
       "caseSensitive": false,
       "activation": ["space", "enter", "tab", "punctuation"],
       "fileExtensions": [],
+      "pathGlobs": [],
+      "languages": [],
       "description": "샘플 한글/숫자 혼합 축약어"
     },
     {
@@ -39,7 +41,9 @@
       "matchMode": "wholeWord",
       "caseSensitive": false,
       "activation": ["space", "enter"],
-      "fileExtensions": []
+      "fileExtensions": [],
+      "pathGlobs": [],
+      "languages": []
     },
     {
       "id": "sample-patch-template",
@@ -50,7 +54,9 @@
       "matchMode": "wholeWord",
       "caseSensitive": false,
       "activation": ["space", "enter", "tab"],
-      "fileExtensions": [".txt", ".md"]
+      "fileExtensions": [".txt", ".md"],
+      "pathGlobs": [],
+      "languages": []
     }
   ]
 }

@@ -166,6 +166,23 @@ void testImmediateRulesAndPrefixSafety() {
     expect(store.size() == 2, "failed immediate load remains transactional");
 }
 
+void testPathAndLanguageFilters() {
+    nppqr::RuleStore store;
+    const auto loaded = store.loadFromText(R"json({"version":1,"items":[{
+      "id":"context","trigger":"ctx","replacement":"matched","activation":["space"],
+      "fileExtensions":[".md"],"pathGlobs":["*/docs/*.md"],"languages":["markdown"]
+    }]})json");
+    expect(loaded.ok, "path and language filters load");
+    expect(store.find("ctx", nppqr::Activation::space, ".MD",
+        "C:\\Work\\docs\\guide.md", "Markdown") != nullptr,
+        "matching extension, path glob, and language allow a rule");
+    expect(store.find("ctx", nppqr::Activation::space, ".md",
+        "C:/Work/source/guide.md", "Markdown") == nullptr,
+        "non-matching path glob blocks a rule");
+    expect(store.find("ctx", nppqr::Activation::space, ".md",
+        "C:/Work/docs/guide.md", "Python") == nullptr,
+        "non-matching language blocks a rule");
+}
 void testUnicodeNormalization() {
     nppqr::RuleStore store;
     const auto loaded = store.loadFromText(R"json(
@@ -189,11 +206,13 @@ void testConfigPreservationAndBackups() {
     const std::filesystem::path configPath = directory / "config.json";
     std::string error;
     expect(nppqr::ConfigStore::writeUtf8FileAtomic(configPath,
-        R"json({"pluginEnabled":true,"futureField":{"keep":42}})json", error),
+        R"json({"pluginEnabled":true,"maxExpandedBytes":2097152,"futureField":{"keep":42}})json", error),
         "test config is written atomically");
     nppqr::PluginConfig config;
     const auto loaded = nppqr::ConfigStore::loadConfig(configPath, config);
     expect(loaded.ok, "test config loads");
+    expect(config.maxExpandedBytes == 2U * 1024U * 1024U,
+        "maxExpandedBytes loads from config");
     config.pluginEnabled = false;
     const bool configSaved = nppqr::ConfigStore::saveConfigAtomic(configPath, config, error);
     if (!configSaved) {
@@ -205,10 +224,27 @@ void testConfigPreservationAndBackups() {
     const nlohmann::json savedJson = nlohmann::json::parse(saved);
     expect(savedJson["futureField"]["keep"] == 42, "unknown config fields survive a save");
     expect(savedJson["pluginEnabled"] == false, "known config fields are updated");
+    expect(savedJson["maxExpandedBytes"] == 2U * 1024U * 1024U,
+        "maxExpandedBytes survives a config save");
 
     const std::filesystem::path replacementsPath = directory / "replacements.json";
+    const std::string originalRules = R"json({"version":1,"items":[]})json";
     expect(nppqr::ConfigStore::writeUtf8FileAtomic(replacementsPath,
-        R"json({"version":1,"items":[]})json", error), "test replacements file is written");
+        originalRules, error), "test replacements file is written");
+    const std::uint64_t originalHash = nppqr::ConfigStore::contentHash(originalRules);
+    const std::string externalRules =
+        R"json({"version":1,"items":[{"trigger":"external","replacement":"kept"}]})json";
+    expect(nppqr::ConfigStore::writeUtf8FileAtomic(replacementsPath, externalRules, error),
+        "simulated external edit is written");
+    expect(nppqr::ConfigStore::writeUtf8FileAtomicIfUnchanged(
+        replacementsPath, originalHash, "stale draft", error) == nppqr::AtomicWriteResult::conflict,
+        "stale draft detects an external write conflict");
+    std::string preservedExternal;
+    expect(nppqr::ConfigStore::readUtf8File(replacementsPath, preservedExternal, error) &&
+        preservedExternal == externalRules + "\n", "conflict leaves the external file unchanged");
+    expect(nppqr::ConfigStore::writeUtf8FileAtomicIfUnchanged(replacementsPath,
+        nppqr::ConfigStore::contentHash(externalRules), originalRules, error) ==
+        nppqr::AtomicWriteResult::written, "matching revision may be written");
     std::filesystem::path backupPath;
     expect(nppqr::ConfigStore::backupReplacements(
         directory, replacementsPath, 3, backupPath, error), "replacement backup is created");
@@ -231,7 +267,10 @@ void testDelimitedExchangeRoundTrip() {
         "caseSensitive":true,
         "activation":["space","enter"],
         "fileExtensions":[".md",".txt"],
-        "description":"쉼표와 줄바꿈 테스트"
+        "pathGlobs":["*/docs/*.md"],
+        "languages":["Markdown"],
+        "description":"쉼표와 줄바꿈 테스트",
+        "futureMetadata":{"keep":42}
       }]
     })json";
 
@@ -259,8 +298,13 @@ void testDelimitedExchangeRoundTrip() {
             "CSV round-trip preserves activation lists");
         expect(item["fileExtensions"] == nlohmann::json::array({".md", ".txt"}),
             "CSV round-trip preserves extension lists");
+        expect(item["pathGlobs"] == nlohmann::json::array({"*/docs/*.md"}) &&
+            item["languages"] == nlohmann::json::array({"Markdown"}),
+            "CSV round-trip preserves path and language filters");
         expect(root["groups"].size() == 1 && root["groups"][0]["id"] == "team",
             "CSV import creates a referenced group");
+        expect(item["futureMetadata"]["keep"] == 42,
+            "CSV extraJson preserves unknown per-rule fields");
     }
 }
 
@@ -301,6 +345,41 @@ void testDelimitedImportModesAndValidation() {
     const auto emptyReplacement = nppqr::RuleExchange::importDelimited(
         existing, "trigger,replacement\r\nbad,\r\n", ',', nppqr::DelimitedImportMode::replace);
     expect(!emptyReplacement.ok, "import rejects a row with an empty replacement");
+    const auto duplicateHeader = nppqr::RuleExchange::importDelimited(
+        existing, "trigger,TRIGGER,replacement\r\na,b,c\r\n", ',',
+        nppqr::DelimitedImportMode::replace);
+    expect(!duplicateHeader.ok && duplicateHeader.error.find("column 2") != std::string::npos,
+        "duplicate headers report the offending column");
+
+    const auto malformedQuote = nppqr::RuleExchange::importDelimited(
+        existing, "trigger,replacement\r\n\"bad\"x,value\r\n", ',',
+        nppqr::DelimitedImportMode::replace);
+    expect(!malformedQuote.ok && malformedQuote.error.find("line 2") != std::string::npos,
+        "malformed quoted fields report the source line");
+
+    constexpr std::string_view generatedIdCsv =
+        "trigger,replacement\r\nstable,deterministic\r\n";
+    const auto generatedA = nppqr::RuleExchange::importDelimited(
+        R"json({"version":1,"items":[]})json", generatedIdCsv, ',',
+        nppqr::DelimitedImportMode::replace);
+    const auto generatedB = nppqr::RuleExchange::importDelimited(
+        R"json({"version":1,"items":[]})json", generatedIdCsv, ',',
+        nppqr::DelimitedImportMode::replace);
+    expect(generatedA.ok && generatedB.ok &&
+        nlohmann::json::parse(generatedA.text)["items"][0]["id"] ==
+        nlohmann::json::parse(generatedB.text)["items"][0]["id"],
+        "generated import ids are deterministic across runs");
+
+    constexpr std::string_view formulaJson = R"json({"version":1,"items":[{
+      "id":"formula","trigger":"=2+2","replacement":"@SUM(A1:A2)","activation":["space"]
+    }]})json";
+    const auto losslessFormula = nppqr::RuleExchange::exportDelimited(formulaJson, ',');
+    expect(losslessFormula.ok && !losslessFormula.warnings.empty(),
+        "lossless export warns about spreadsheet formula cells");
+    const auto safeFormula = nppqr::RuleExchange::exportDelimited(formulaJson, ',', true);
+    expect(safeFormula.ok && safeFormula.text.find("'=2+2") != std::string::npos &&
+        safeFormula.text.find("'@SUM") != std::string::npos,
+        "spreadsheet-safe export prefixes risky formula cells");
 }
 
 void testTenThousandRules() {
@@ -340,6 +419,7 @@ int main() {
     testDelimiterClassification();
     testValidationAndTransactionalLoad();
     testImmediateRulesAndPrefixSafety();
+    testPathAndLanguageFilters();
     testUnicodeNormalization();
     testConfigPreservationAndBackups();
     testDelimitedExchangeRoundTrip();
